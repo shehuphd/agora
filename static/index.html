@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agora</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-brand">
+    <i class="ti ti-message-dots" aria-hidden="true"></i>
+    AGORA
+  </div>
+  <a class="nav-tab" href="#/history">history</a>
+  <a class="nav-tab" href="#/new">new debate</a>
+  <a class="nav-tab" href="#/settings">settings</a>
+  <div class="nav-right">
+    <div class="nav-token-chip">
+      <i class="ti ti-cpu" aria-hidden="true"></i>
+      all-time
+      <span class="nav-token-val" id="nav-token-total">0</span>
+    </div>
+  </div>
+</nav>
+
+<!-- API key nudge banner — shown when at least one key is missing; hidden by app.js once all keys are present -->
+<div class="key-banner" id="key-banner" style="display:none">
+  <i class="ti ti-alert-triangle" aria-hidden="true"></i>
+  <span>one or more API keys are missing — models without keys can't be used.</span>
+  <a href="#/settings" class="key-banner-link">add keys in settings</a>
+  <button class="key-banner-close" aria-label="dismiss" onclick="this.parentElement.style.display='none'">
+    <i class="ti ti-x" aria-hidden="true"></i>
+  </button>
+</div>
+
+<!-- SCREEN 1: HISTORY -->
+<main id="screen-history" class="screen">
+  <div class="pg-head">
+    <div>
+      <h1 class="pg-title">debate history</h1>
+      <p class="pg-sub" id="history-subtitle">loading...</p>
+    </div>
+    <a href="#/new" class="btn-primary">
+      <i class="ti ti-plus" aria-hidden="true"></i>
+      new debate
+    </a>
+  </div>
+  <div class="empty-state" id="history-empty" style="display:none">
+    <div class="empty-icon"><i class="ti ti-message-dots" aria-hidden="true"></i></div>
+    <p class="empty-title">no debates yet</p>
+    <p class="empty-body">Start a debate to see it appear here. Each run stores its full act log, token usage, and argument map.</p>
+    <a href="#/new" class="btn-primary">start your first debate</a>
+  </div>
+  <div id="history-table-wrap" style="display:none">
+    <div class="export-bar" id="export-bar" style="display:none">
+      <span class="export-bar-count" id="export-sel-count">0 selected</span>
+      <button class="btn-ghost btn-sm" id="btn-export-selected">
+        <i class="ti ti-download" aria-hidden="true"></i> export selected
+      </button>
+      <button class="btn-ghost btn-sm" id="btn-deselect-all">clear</button>
+    </div>
+    <table class="run-table">
+      <thead>
+        <tr>
+          <th class="col-check"><input type="checkbox" id="check-all" title="select all"></th>
+          <th>run id</th>
+          <th>title</th>
+          <th>participants</th>
+          <th>turns</th>
+          <th>tokens</th>
+          <th>mode</th>
+          <th>status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="history-tbody"></tbody>
+    </table>
+  </div>
+</main>
+
+<!-- SCREEN 2: NEW DEBATE -->
+<main id="screen-new" class="screen">
+  <div class="pg-head">
+    <div>
+      <h1 class="pg-title">new debate</h1>
+      <p class="pg-sub">configure participants, topic, and thresholds before starting</p>
+    </div>
+  </div>
+  <form id="new-debate-form">
+
+    <!-- Topic card -->
+    <div class="card">
+      <div class="card-title">
+        <span><i class="ti ti-pencil" aria-hidden="true"></i> debate topic</span>
+        <button class="btn-ghost btn-sm" id="btn-random-topic" type="button">
+          <i class="ti ti-dice" aria-hidden="true"></i> random topic
+        </button>
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="topic">topic statement</label>
+        <textarea id="topic" name="topic" rows="3" placeholder="AI agents will replace knowledge workers within a decade."></textarea>
+      </div>
+      <div class="field-row">
+        <label class="field-label" for="debate-title">
+          debate title
+          <span class="field-hint">(leave blank to auto-generate from topic)</span>
+        </label>
+        <input type="text" id="debate-title" name="debate_title" placeholder="Arbiter will generate a title if left blank">
+      </div>
+    </div>
+
+    <!-- Participants card -->
+    <div class="card">
+      <div class="card-title"><i class="ti ti-users" aria-hidden="true"></i> participants</div>
+      <div class="three-col">
+
+        <!-- Proposition -->
+        <div class="agent-setup">
+          <div class="agent-setup-head">
+            <div class="av av-prop">P</div>
+            <div>
+              <div class="agent-role-label">proposition · asserter</div>
+              <div class="agent-name-label" id="prop-name-preview">participant A</div>
+            </div>
+          </div>
+          <div class="field-row">
+            <label class="field-label" for="prop-nickname">nickname</label>
+            <input type="text" id="prop-nickname" name="prop_nickname" placeholder="Atlas"
+              oninput="document.getElementById('prop-name-preview').textContent=this.value||'participant A'">
+          </div>
+          <div class="field-row">
+            <label class="field-label" for="prop-model">model</label>
+            <select id="prop-model" name="prop_model"></select>
+          </div>
+          <div class="field-row">
+            <label class="field-label">temperature <span class="slider-readout" id="prop-temp-out">0.7</span></label>
+            <input type="range" min="0" max="10" value="7" step="1" name="prop_temperature"
+              oninput="document.getElementById('prop-temp-out').textContent=(this.value/10).toFixed(1)">
+          </div>
+        </div>
+
+        <!-- Opposition -->
+        <div class="agent-setup">
+          <div class="agent-setup-head">
+            <div class="av av-opp">O</div>
+            <div>
+              <div class="agent-role-label">opposition · critic</div>
+              <div class="agent-name-label" id="opp-name-preview">participant B</div>
+            </div>
+          </div>
+          <div class="field-row">
+            <label class="field-label" for="opp-nickname">nickname</label>
+            <input type="text" id="opp-nickname" name="opp_nickname" placeholder="Vega"
+              oninput="document.getElementById('opp-name-preview').textContent=this.value||'participant B'">
+          </div>
+          <div class="field-row">
+            <label class="field-label" for="opp-model">model</label>
+            <select id="opp-model" name="opp_model"></select>
+          </div>
+          <div class="field-row">
+            <label class="field-label">temperature <span class="slider-readout" id="opp-temp-out">0.4</span></label>
+            <input type="range" min="0" max="10" value="4" step="1" name="opp_temperature"
+              oninput="document.getElementById('opp-temp-out').textContent=(this.value/10).toFixed(1)">
+          </div>
+          <div class="field-row">
+            <label class="field-label">aggression <span class="slider-readout" id="opp-agg-out">0.8</span>
+              <!-- 0.0 = only clear errors; 1.0 = challenge every borderline claim -->
+            </label>
+            <input type="range" min="0" max="10" value="8" step="1" name="opp_aggression"
+              oninput="document.getElementById('opp-agg-out').textContent=(this.value/10).toFixed(1)">
+          </div>
+        </div>
+
+        <!-- Moderator -->
+        <div class="agent-setup">
+          <div class="agent-setup-head">
+            <div class="av av-mod">M</div>
+            <div>
+              <div class="agent-role-label">moderator + synthesiser</div>
+              <div class="agent-name-label" id="mod-name-preview">Arbiter</div>
+            </div>
+          </div>
+          <div class="field-row">
+            <label class="field-label" for="mod-nickname">nickname</label>
+            <input type="text" id="mod-nickname" name="mod_nickname" placeholder="Arbiter"
+              oninput="document.getElementById('mod-name-preview').textContent=this.value||'Arbiter'">
+          </div>
+          <div class="field-row">
+            <label class="field-label" for="mod-model">model</label>
+            <select id="mod-model" name="mod_model"></select>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label">auto-generate debate title</span>
+            <button type="button" class="toggle on" role="switch" aria-checked="true"
+              id="toggle-auto-title"
+              onclick="this.classList.toggle('on');this.setAttribute('aria-checked',this.classList.contains('on'))"></button>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label">require full resolution before closing</span>
+            <button type="button" class="toggle" role="switch" aria-checked="false"
+              id="toggle-full-resolution"
+              onclick="this.classList.toggle('on');this.setAttribute('aria-checked',this.classList.contains('on'))"></button>
+          </div>
+        </div>
+
+      </div><!-- /three-col -->
+    </div><!-- /participants card -->
+
+    <!-- Protocol card -->
+    <div class="card">
+      <div class="card-title"><i class="ti ti-shield-check" aria-hidden="true"></i> protocol</div>
+      <div class="toggle-row" style="margin-bottom:8px">
+        <div>
+          <span class="toggle-label">Rapoport mode (require steelman)</span>
+          <p class="field-hint" style="margin-top:2px">Opposition must accurately restate each claim before challenging it. Cannot be changed mid-run.</p>
+        </div>
+        <button type="button" class="toggle" role="switch" aria-checked="false"
+          id="toggle-steelman"
+          onclick="this.classList.toggle('on');this.setAttribute('aria-checked',this.classList.contains('on'))"></button>
+      </div>
+    </div>
+
+    <!-- Thresholds card -->
+    <div class="card">
+      <div class="card-title"><i class="ti ti-sliders" aria-hidden="true"></i> termination thresholds</div>
+      <div class="two-col">
+        <div>
+          <div class="thresh-row">
+            <span class="thresh-label">max turns</span>
+            <div class="thresh-right">
+              <input type="range" min="8" max="30" value="15" step="1" name="max_turns"
+                oninput="this.nextElementSibling.textContent=this.value">
+              <span class="thresh-val">15</span>
+            </div>
+          </div>
+          <div class="thresh-row">
+            <span class="thresh-label">max time (min)</span>
+            <div class="thresh-right">
+              <input type="range" min="1" max="60" value="15" step="1" name="max_time"
+                oninput="this.nextElementSibling.textContent=this.value">
+              <span class="thresh-val">15</span>
+            </div>
+          </div>
+          <div class="thresh-row">
+            <span class="thresh-label">token budget (k)</span>
+            <div class="thresh-right">
+              <input type="range" min="10" max="500" value="40" step="10" name="token_budget"
+                oninput="this.nextElementSibling.textContent=this.value+'k'">
+              <span class="thresh-val">40k</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="thresh-row">
+            <span class="thresh-label">min challenges</span>
+            <div class="thresh-right">
+              <input type="range" min="1" max="8" value="3" step="1" name="min_challenges"
+                oninput="this.nextElementSibling.textContent=this.value">
+              <span class="thresh-val">3</span>
+            </div>
+          </div>
+          <div class="thresh-row">
+            <span class="thresh-label">min concessions</span>
+            <div class="thresh-right">
+              <input type="range" min="0" max="5" value="1" step="1" name="min_concessions"
+                oninput="this.nextElementSibling.textContent=this.value">
+              <span class="thresh-val">1</span>
+            </div>
+          </div>
+          <div class="thresh-row">
+            <span class="thresh-label">repetition tolerance</span>
+            <div class="thresh-right">
+              <input type="range" min="0" max="5" value="1" step="1" name="rep_tolerance"
+                oninput="this.nextElementSibling.textContent=this.value">
+              <span class="thresh-val">1</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <a href="#/history" class="btn-ghost">cancel</a>
+      <button type="submit" class="btn-primary">
+        <i class="ti ti-arrow-right" aria-hidden="true"></i>
+        review and start
+      </button>
+    </div>
+  </form>
+</main>
+
+<!-- SCREEN 3: CONFIRM -->
+<main id="screen-confirm" class="screen">
+  <div class="pg-head">
+    <h1 class="pg-title">confirm debate</h1>
+  </div>
+  <div class="confirm-overlay">
+    <div class="confirm-card">
+      <h2 class="confirm-title">start this debate?</h2>
+      <p class="confirm-body">
+        Review the config below. Once started, participant models and the topic can't change
+        mid-run. Thresholds can be adjusted via mid-run overrides.
+      </p>
+      <div class="confirm-detail">
+        <div class="confirm-row"><span class="confirm-key">topic</span><span class="confirm-val confirm-val-text" id="confirm-topic"></span></div>
+        <div class="confirm-row"><span class="confirm-key">proposition</span><span class="confirm-val" id="confirm-prop"></span></div>
+        <div class="confirm-row"><span class="confirm-key">opposition</span><span class="confirm-val" id="confirm-opp"></span></div>
+        <div class="confirm-row"><span class="confirm-key">moderator</span><span class="confirm-val" id="confirm-mod"></span></div>
+        <div class="confirm-row"><span class="confirm-key">max turns</span><span class="confirm-val" id="confirm-turns"></span></div>
+        <div class="confirm-row"><span class="confirm-key">token budget</span><span class="confirm-val" id="confirm-budget"></span></div>
+        <div class="confirm-row"><span class="confirm-key">protocol mode</span><span class="confirm-val" id="confirm-mode"></span></div>
+      </div>
+      <div class="confirm-actions">
+        <a href="#/new" class="btn-ghost" style="flex:1;justify-content:center">go back</a>
+        <button id="confirm-start-btn" class="btn-primary" style="flex:1;justify-content:center">
+          <i class="ti ti-player-play" aria-hidden="true"></i>
+          start debate
+        </button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- SCREEN 4: LIVE DEBATE -->
+<main id="screen-debate" class="screen">
+  <div class="debate-header">
+    <div class="dh-nav">
+      <a href="#/history" class="dh-back-link">
+        <i class="ti ti-arrow-left" aria-hidden="true"></i> history
+      </a>
+      <div class="dh-nav-right">
+        <button class="btn-primary btn-sm" id="btn-rerun" style="display:none">
+          <i class="ti ti-refresh" aria-hidden="true"></i> rerun with same settings
+        </button>
+        <button class="btn-solid btn-sm" id="btn-export-debate">
+          <i class="ti ti-download" aria-hidden="true"></i> export JSON
+        </button>
+      </div>
+    </div>
+    <div class="dh-top">
+      <div>
+        <h1 class="dh-title" id="dh-title">loading...</h1>
+        <p class="dh-id" id="dh-id"></p>
+      </div>
+      <div class="dh-controls">
+        <span class="badge-live" id="dh-turn-badge">turn 0</span>
+        <button class="btn-ghost btn-icon" id="btn-pause" aria-label="pause debate">
+          <i class="ti ti-player-pause" aria-hidden="true"></i>
+        </button>
+        <button class="btn-danger btn-icon" id="btn-end" aria-label="end debate">
+          <i class="ti ti-x" aria-hidden="true"></i> end
+        </button>
+      </div>
+    </div>
+    <div class="token-strip">
+      <div class="tok-card">
+        <div class="tok-label">this debate</div>
+        <div class="tok-val" id="tok-total">0</div>
+        <div class="tok-model">all agents</div>
+      </div>
+      <div class="tok-card">
+        <div class="tok-label" id="tok-prop-label">proposition</div>
+        <div class="tok-val" id="tok-prop">0</div>
+        <div class="tok-model" id="tok-prop-model"></div>
+      </div>
+      <div class="tok-card">
+        <div class="tok-label" id="tok-opp-label">opposition</div>
+        <div class="tok-val" id="tok-opp">0</div>
+        <div class="tok-model" id="tok-opp-model"></div>
+      </div>
+      <div class="tok-card">
+        <div class="tok-label" id="tok-mod-label">moderator</div>
+        <div class="tok-val" id="tok-mod">0</div>
+        <div class="tok-model" id="tok-mod-model"></div>
+      </div>
+    </div>
+    <div class="budget-bar">
+      <span class="budget-label" id="budget-label">0 / 100,000 tokens used</span>
+      <div class="budget-track"><div class="budget-fill" id="budget-fill" style="width:0%"></div></div>
+      <span class="budget-pct" id="budget-pct">0%</span>
+    </div>
+  </div>
+
+  <div class="term-tracker">
+    <div class="term-row">
+      <span class="term-label">turns used</span>
+      <div class="term-bar"><div class="term-fill fill-ok" id="term-turns" style="width:0%"></div></div>
+      <span class="term-val" id="term-turns-val">0 / 8</span>
+    </div>
+    <div class="term-row">
+      <span class="term-label">open challenges</span>
+      <div class="term-bar"><div class="term-fill fill-warn" id="term-challenges" style="width:0%"></div></div>
+      <span class="term-val" id="term-challenges-val">0</span>
+    </div>
+    <div class="term-row">
+      <span class="term-label">repetition detected</span>
+      <div class="term-bar"><div class="term-fill fill-ok" id="term-rep" style="width:0%"></div></div>
+      <span class="term-val term-val-ok" id="term-rep-val">none</span>
+    </div>
+  </div>
+
+  <div class="override-bar" id="override-bar">
+    <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
+    <span class="override-label">mid-run override available · <span id="override-count">0</span> applied this run</span>
+    <button class="override-btn" id="btn-override">apply override</button>
+  </div>
+
+  <div class="sec-head">act log</div>
+  <div class="act-feed" id="act-feed" aria-live="polite" aria-label="debate act log"></div>
+</main>
+
+<!-- SCREEN 5: SETTINGS -->
+<main id="screen-settings" class="screen">
+  <div class="pg-head">
+    <div>
+      <h1 class="pg-title">settings</h1>
+      <p class="pg-sub">API keys, defaults, and token tracking</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="ti ti-key" aria-hidden="true"></i> API keys</div>
+    <div id="api-key-status"></div>
+    <div class="field-row" style="margin-top:12px">
+      <label class="field-label">env file path</label>
+      <div style="display:flex;align-items:center;gap:8px">
+        <code class="env-path" id="env-path-display"></code>
+        <a id="env-open-link" href="#" class="btn-ghost" style="font-size:11px">
+          <i class="ti ti-folder-open" aria-hidden="true"></i> open
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="ti ti-cpu" aria-hidden="true"></i> token usage (all-time)</div>
+    <div class="token-strip" style="margin-bottom:12px">
+      <div class="tok-card">
+        <div class="tok-label">total</div>
+        <div class="tok-val" id="settings-tok-total">0</div>
+        <div class="tok-model">input + output</div>
+      </div>
+      <div class="tok-card">
+        <div class="tok-label">input</div>
+        <div class="tok-val" id="settings-tok-input">0</div>
+        <div class="tok-model">all sessions</div>
+      </div>
+      <div class="tok-card">
+        <div class="tok-label">output</div>
+        <div class="tok-val" id="settings-tok-output">0</div>
+        <div class="tok-model">all sessions</div>
+      </div>
+    </div>
+    <button class="btn-danger" id="btn-reset-tokens">
+      <i class="ti ti-refresh" aria-hidden="true"></i>
+      reset display counter
+    </button>
+    <p class="pg-sub" style="margin-top:6px">resets the counter only — underlying data is preserved</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="ti ti-shield-check" aria-hidden="true"></i> protocol defaults</div>
+    <div class="toggle-row" style="margin-bottom:4px">
+      <div>
+        <span class="toggle-label">Rapoport mode (require steelman)</span>
+        <p class="field-hint" style="margin-top:2px">Opposition must restate each claim before challenging it.</p>
+      </div>
+      <button type="button" class="toggle" role="switch" aria-checked="false" id="s-toggle-steelman"
+        onclick="this.classList.toggle('on');this.setAttribute('aria-checked',this.classList.contains('on'))"></button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="ti ti-sliders" aria-hidden="true"></i> default thresholds</div>
+    <p class="pg-sub" style="margin-bottom:12px">These values pre-fill every new debate. Save to update defaults.yaml.</p>
+    <div class="two-col">
+      <div>
+        <div class="thresh-row">
+          <span class="thresh-label">max turns</span>
+          <div class="thresh-right">
+            <input type="range" min="8" max="30" value="15" step="1" id="s-max-turns"
+              oninput="this.nextElementSibling.textContent=this.value">
+            <span class="thresh-val">15</span>
+          </div>
+        </div>
+        <div class="thresh-row">
+          <span class="thresh-label">max time (min)</span>
+          <div class="thresh-right">
+            <input type="range" min="1" max="60" value="15" step="1" id="s-max-time"
+              oninput="this.nextElementSibling.textContent=this.value">
+            <span class="thresh-val">15</span>
+          </div>
+        </div>
+        <div class="thresh-row">
+          <span class="thresh-label">token budget (k)</span>
+          <div class="thresh-right">
+            <input type="range" min="10" max="500" value="40" step="10" id="s-token-budget"
+              oninput="this.nextElementSibling.textContent=this.value+'k'">
+            <span class="thresh-val">40k</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="thresh-row">
+          <span class="thresh-label">min challenges</span>
+          <div class="thresh-right">
+            <input type="range" min="1" max="8" value="3" step="1" id="s-min-challenges"
+              oninput="this.nextElementSibling.textContent=this.value">
+            <span class="thresh-val">3</span>
+          </div>
+        </div>
+        <div class="thresh-row">
+          <span class="thresh-label">min concessions</span>
+          <div class="thresh-right">
+            <input type="range" min="0" max="5" value="1" step="1" id="s-min-concessions"
+              oninput="this.nextElementSibling.textContent=this.value">
+            <span class="thresh-val">1</span>
+          </div>
+        </div>
+        <div class="thresh-row">
+          <span class="thresh-label">repetition tolerance</span>
+          <div class="thresh-right">
+            <input type="range" min="0" max="5" value="1" step="1" id="s-rep-tolerance"
+              oninput="this.nextElementSibling.textContent=this.value">
+            <span class="thresh-val">1</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="form-actions" style="margin-top:12px">
+      <button class="btn-primary" id="btn-save-defaults">
+        <i class="ti ti-device-floppy" aria-hidden="true"></i>
+        save defaults
+      </button>
+    </div>
+  </div>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
