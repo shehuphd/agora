@@ -261,14 +261,17 @@ class BaseAgent:
 
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                response = client.chat.completions.create(
-                    model=self.model,
-                    temperature=self.temperature,
-                    messages=[
+                kwargs: dict = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
                     ],
-                )
+                }
+                if not self._temperature_deprecated:
+                    kwargs["temperature"] = self.temperature
+
+                response = client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
                 usage = response.usage
                 return content, usage.prompt_tokens, usage.completion_tokens
@@ -281,6 +284,10 @@ class BaseAgent:
                     time.sleep(_BACKOFF_BASE * (2 ** attempt))
 
             except APIStatusError as e:
+                if e.status_code == 400 and "temperature" in str(e).lower() and not self._temperature_deprecated:
+                    self._temperature_deprecated = True
+                    last_exc = e
+                    continue  # retry immediately without temperature
                 if e.status_code in (500, 502, 503) and attempt < _MAX_ATTEMPTS - 1:
                     last_exc = e
                     time.sleep(_BACKOFF_BASE * (2 ** attempt))
