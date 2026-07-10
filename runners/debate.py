@@ -17,15 +17,41 @@ from agents.proposition import PropositionAgent
 from agents.opposition import OppositionAgent
 from agents.moderator import ModeratorAgent
 from agents.synthesiser import SynthesiserAgent
+from agents.base import QuotaExhaustedError
+
+_WARNINGS_PATH = Path(__file__).parent.parent / "config" / "key_warnings.json"
+
+
+def _write_quota_warning(provider: str) -> None:
+    """Persist a quota-exhaustion timestamp for the given provider."""
+    try:
+        warnings: dict = {}
+        if _WARNINGS_PATH.exists():
+            with open(_WARNINGS_PATH) as f:
+                warnings = _json.load(f)
+        warnings[provider] = datetime.utcnow().isoformat()
+        with open(_WARNINGS_PATH, "w") as f:
+            _json.dump(warnings, f)
+    except Exception:
+        pass
 
 # Hard ceiling on a single LLM call. Prevents a hung provider from stalling the
 # SSE stream indefinitely. The user sees a timeout error; they can retry.
 _AGENT_TIMEOUT = 90.0  # seconds
 
 
-async def run_debate(session_id: str, config: DebateRunConfig, run_dir: Path, event_queue: asyncio.Queue):
+async def run_debate(
+    session_id: str,
+    config: DebateRunConfig,
+    run_dir: Path,
+    event_queue: asyncio.Queue,
+    pause_event: asyncio.Event | None = None,
+    overrides: dict | None = None,
+    force_close_event: asyncio.Event | None = None,
+):
     """Entry point: initialise DB + state, build agents, run orchestrator."""
     run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.json").write_text(config.to_json())
     db_path = run_dir / "debate.db"
     conn = sqlite3.connect(str(db_path))
     init_db(conn)
@@ -87,6 +113,11 @@ async def run_debate(session_id: str, config: DebateRunConfig, run_dir: Path, ev
     )
     synthesiser = SynthesiserAgent(config={})
 
+    # Default no-op pause_event (always "running") when not supplied
+    if pause_event is None:
+        pause_event = asyncio.Event()
+        pause_event.set()
+
     orchestrator = TurnOrchestrator(
         state=state,
         agents=[proposition, opposition],
@@ -96,6 +127,9 @@ async def run_debate(session_id: str, config: DebateRunConfig, run_dir: Path, ev
         event_queue=event_queue,
         run_dir=run_dir,
         config=config,
+        pause_event=pause_event,
+        overrides=overrides or {},
+        force_close_event=force_close_event,
     )
     await orchestrator.run()
 
@@ -119,6 +153,9 @@ class TurnOrchestrator:
         event_queue: asyncio.Queue,
         run_dir: Path,
         config: DebateRunConfig,
+        pause_event: asyncio.Event | None = None,
+        overrides: dict | None = None,
+        force_close_event: asyncio.Event | None = None,
     ):
         self.state = state
         self.agents = agents
@@ -128,7 +165,21 @@ class TurnOrchestrator:
         self.event_queue = event_queue
         self.run_dir = run_dir
         self.config = config
+        self._pause_event = pause_event or asyncio.Event()
+        if not self._pause_event.is_set():
+            self._pause_event.set()
+        self._overrides = overrides if overrides is not None else {}
+        self._force_close_event = force_close_event or asyncio.Event()
         self._loop = asyncio.get_running_loop()
+
+    def _effective_token_budget(self) -> int:
+        return self._overrides.get("token_budget", self.config.protocol.token_budget)
+
+    async def _wait_if_paused(self) -> None:
+        if not self._pause_event.is_set():
+            await self.event_queue.put({"type": "paused"})
+            await self._pause_event.wait()
+            await self.event_queue.put({"type": "resumed"})
 
     async def run(self) -> None:
         max_turns = self.config.protocol.max_turns
@@ -147,6 +198,8 @@ class TurnOrchestrator:
 
         try:
             while self.state.turn < max_turns * 2 + 4:  # safety ceiling
+                await self._wait_if_paused()
+
                 agent = self.agents[turn_idx % 2]
                 self.state.next_agent = agent.role
 
@@ -160,6 +213,10 @@ class TurnOrchestrator:
                         "message": "Agent timed out (90 s) — the AI provider may be overloaded. Try again.",
                     })
                     break
+                except QuotaExhaustedError as e:
+                    _write_quota_warning(e.provider)
+                    await self.event_queue.put({"type": "error", "message": _friendly_quota_error(e.provider)})
+                    break
                 except Exception as e:
                     await self.event_queue.put({"type": "error", "message": _friendly_error(e)})
                     break
@@ -169,9 +226,19 @@ class TurnOrchestrator:
                 await self.event_queue.put(_act_to_dict(act))
                 await asyncio.sleep(0.7)
 
-                should_close, closure_reason = check_termination(
-                    self.state, self.config.to_termination_dict()
-                )
+                # Build effective termination config (may differ from original if budget overridden)
+                term_cfg = self.config.to_termination_dict()
+                term_cfg["protocol"]["token_budget"] = self._effective_token_budget()
+                should_close, closure_reason = check_termination(self.state, term_cfg)
+
+                # User clicked "end debate" — override termination regardless of turn count.
+                if self._force_close_event.is_set():
+                    should_close   = True
+                    closure_reason = "user_requested_end"
+
+                # Sync moderator's displayed budget to the current effective value.
+                # The attribute is _token_budget (private) — must use the correct name.
+                self.moderator._token_budget = self._effective_token_budget()
 
                 await self.event_queue.put({"type": "thinking", "agent": "Moderator", "role": "moderator"})
                 try:
@@ -188,6 +255,16 @@ class TurnOrchestrator:
                     # even if check_termination didn't instruct it to close.
                     if mod_act.act_type == "CLOSE":
                         should_close = True
+                except QuotaExhaustedError as e:
+                    _write_quota_warning(e.provider)
+                    print(f"[runner] MODERATOR QUOTA ERROR: {e}", flush=True)
+                    await self.event_queue.put({
+                        "type": "error",
+                        "message": f"Moderator: {_friendly_quota_error(e.provider)}",
+                    })
+                    should_close = True
+                    if not self.state.closure_reason:
+                        self.state.closure_reason = "moderator_error"
                 except Exception as e:
                     print(f"[runner] MODERATOR ERROR: {e}\n{traceback.format_exc()}", flush=True)
                     await self.event_queue.put({
@@ -205,6 +282,12 @@ class TurnOrchestrator:
                         apply_act(self.state, synth_act)
                         checkpoint(self.conn, self.state, synth_act, self.run_dir)
                         await self.event_queue.put(_act_to_dict(synth_act))
+                    except QuotaExhaustedError as e:
+                        _write_quota_warning(e.provider)
+                        await self.event_queue.put({
+                            "type": "error",
+                            "message": f"Synthesiser: {_friendly_quota_error(e.provider)}",
+                        })
                     except Exception as e:
                         await self.event_queue.put({
                             "type": "error",
@@ -271,3 +354,13 @@ def _friendly_error(e: Exception) -> str:
     if "overloaded" in low or "529" in msg:
         return "The AI provider is currently overloaded — try again in a few minutes."
     return msg
+
+
+def _friendly_quota_error(provider: str) -> str:
+    names = {"anthropic": "Anthropic", "openai": "OpenAI", "google": "Google"}
+    name = names.get(provider, provider)
+    return (
+        f"Your {name} account has run out of credits. "
+        f"Check your billing at {name}'s dashboard, or update the key in Agora Settings. "
+        f"A warning indicator has been added next to the key."
+    )

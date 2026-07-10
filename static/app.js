@@ -93,20 +93,100 @@ const ALL_MODELS = [
   { value: 'claude-haiku-4-5',  label: 'claude haiku 4.5',  provider: 'anthropic' },
   { value: 'gpt-4o',            label: 'gpt-4o',            provider: 'openai' },
   { value: 'gpt-4o-mini',       label: 'gpt-4o mini',       provider: 'openai' },
+  { value: 'gemini-2.0-flash',  label: 'gemini 2.0 flash',  provider: 'google' },
+  { value: 'gemini-1.5-pro',    label: 'gemini 1.5 pro',    provider: 'google' },
+  { value: 'gemini-1.5-flash',  label: 'gemini 1.5 flash',  provider: 'google' },
 ];
+
+function _providerForModel(model) {
+  if (!model) return null;
+  if (model.startsWith('claude'))  return 'anthropic';
+  if (model.startsWith('gemini'))  return 'google';
+  return 'openai';
+}
 
 // ============================================================
 // SCREEN 2: NEW DEBATE
 // ============================================================
 
+function _prefillFromPending(cfg) {
+  // Text inputs / selects — all have id attributes
+  const _set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el && val != null) el.value = val;
+  };
+  _set('topic',         cfg.topic);
+  _set('prop-model',    cfg.prop_model);
+  _set('opp-model',     cfg.opp_model);
+  _set('mod-model',     cfg.mod_model);
+  _set('prop-nickname', cfg.prop_nickname);
+  _set('opp-nickname',  cfg.opp_nickname);
+  _set('mod-nickname',  cfg.mod_nickname);
+
+  // Update nickname preview labels
+  if (cfg.prop_nickname) { const el = document.getElementById('prop-name-preview'); if (el) el.textContent = cfg.prop_nickname; }
+  if (cfg.opp_nickname)  { const el = document.getElementById('opp-name-preview');  if (el) el.textContent = cfg.opp_nickname; }
+  if (cfg.mod_nickname)  { const el = document.getElementById('mod-name-preview');  if (el) el.textContent = cfg.mod_nickname; }
+
+  // Temperature / aggression sliders — inputs use name= (no id), displays have id
+  // pendingDebate stores floats (0.0–1.0); sliders are 0–10 integers
+  const _setTempSlider = (name, displayId, floatVal) => {
+    if (floatVal == null) return;
+    const v = Math.round(floatVal * 10);
+    const input = document.querySelector(`input[name="${name}"]`);
+    const disp  = document.getElementById(displayId);
+    if (input) input.value = v;
+    if (disp)  disp.textContent = (v / 10).toFixed(1);
+  };
+  _setTempSlider('prop_temperature', 'prop-temp-out', cfg.prop_temperature);
+  _setTempSlider('opp_temperature',  'opp-temp-out',  cfg.opp_temperature);
+  _setTempSlider('opp_aggression',   'opp-agg-out',   cfg.opp_aggression);
+
+  // Threshold sliders — inputs use name=; display is input.nextElementSibling
+  const _setThresh = (name, val, fmt) => {
+    if (val == null) return;
+    const input = document.querySelector(`input[name="${name}"]`);
+    if (!input) return;
+    input.value = val;
+    const disp = input.nextElementSibling;
+    if (disp) disp.textContent = fmt(val);
+  };
+  _setThresh('max_turns',      cfg.max_turns,                          v => v);
+  _setThresh('max_time',       cfg.max_time_minutes,                   v => v);
+  _setThresh('token_budget',   Math.round((cfg.token_budget || 0) / 1000), v => v + 'k');
+  _setThresh('min_challenges', cfg.min_challenges,                     v => v);
+  _setThresh('min_concessions',cfg.min_concessions,                    v => v);
+  _setThresh('rep_tolerance',  cfg.repetition_tolerance,               v => v);
+
+  // Toggles
+  const _setToggle = (id, value) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('on', !!value);
+    el.setAttribute('aria-checked', String(!!value));
+  };
+  _setToggle('toggle-steelman',        cfg.require_steelman);
+  _setToggle('toggle-full-resolution', cfg.require_full_resolution);
+  _setToggle('toggle-auto-title',      cfg.auto_generate_title ?? true);
+}
+
 async function loadNew() {
   let keyStatus = {};
+  let agentCfg  = {};
   try {
     const res = await fetch('/settings');
-    if (res.ok) keyStatus = (await res.json()).key_status || {};
+    if (res.ok) {
+      const data = await res.json();
+      keyStatus = data.key_status || {};
+      agentCfg  = data.config?.agents || {};
+    }
   } catch (e) { /* defaults — all disabled */ }
 
-  const DEFAULTS = { 'prop-model': 'claude-sonnet-4-6', 'opp-model': 'gpt-4o', 'mod-model': 'claude-opus-4-8' };
+  const DEFAULTS = {
+    'prop-model': agentCfg.proposition?.model || 'claude-sonnet-4-6',
+    'opp-model':  agentCfg.opposition?.model  || 'gpt-4o',
+    'mod-model':  agentCfg.moderator?.model   || 'claude-opus-4-8',
+  };
 
   ['prop-model', 'opp-model', 'mod-model'].forEach(id => {
     const sel = document.getElementById(id);
@@ -177,6 +257,14 @@ async function loadNew() {
     sessionStorage.setItem('pendingDebate', JSON.stringify(cfg));
     window.location.hash = '#/confirm';
   };
+
+  // Prefill from pendingDebate when navigating back from the confirm screen.
+  // The rerun button stores config directly in sessionStorage and skips this form,
+  // but if the user clicks "go back" from confirm we restore their settings here.
+  const _raw = sessionStorage.getItem('pendingDebate');
+  if (_raw) {
+    try { _prefillFromPending(JSON.parse(_raw)); } catch (_) {}
+  }
 }
 
 // ============================================================
@@ -231,18 +319,91 @@ async function loadSettings() {
     const container = document.getElementById('api-key-status');
     container.innerHTML = '';
     const KEY_MAP = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', google: 'GOOGLE_API_KEY' };
+    const warnings = data.key_warnings || {};
+
+    // Map provider → which agent roles currently use it (based on model defaults).
+    const _agentsCfg = data.config?.agents || {};
+    const _rolesByProvider = {};
+    [['proposition', _agentsCfg.proposition?.model],
+     ['opposition',  _agentsCfg.opposition?.model],
+     ['moderator',   _agentsCfg.moderator?.model]].forEach(([role, model]) => {
+      const p = _providerForModel(model);
+      if (p) (_rolesByProvider[p] = _rolesByProvider[p] || []).push(role);
+    });
+
     Object.entries(KEY_MAP).forEach(([provider, envName]) => {
-      const ok = data.key_status?.[provider];
+      const ok   = data.key_status?.[provider];
+      const warn = warnings[provider];
+
       const row = document.createElement('div');
       row.className = 'key-row';
+      row.dataset.provider = provider;
+
+      const warnHtml = warn
+        ? `<span class="key-warn" title="Quota or credit exhausted on ${new Date(warn).toLocaleString()}">
+             <i class="ti ti-alert-triangle" aria-hidden="true"></i> quota exceeded
+           </span>`
+        : '';
+
+      const usedByRoles = _rolesByProvider[provider] || [];
+      const usedByHtml  = usedByRoles.length
+        ? `<span class="key-used-by">used by: ${usedByRoles.join(' · ')}</span>`
+        : `<span class="key-used-by key-used-by-none">not in use</span>`;
+
       row.innerHTML = `
         <span class="key-name">${esc(envName)}</span>
         <span class="${ok ? 'key-status-ok' : 'key-status-missing'}">
           <i class="ti ${ok ? 'ti-check' : 'ti-x'}" aria-hidden="true"></i>
           ${ok ? 'present' : 'missing'}
         </span>
+        ${usedByHtml}
+        ${warnHtml}
+        <button class="btn-ghost key-edit-btn" data-provider="${esc(provider)}" style="font-size:11px;margin-left:auto">
+          <i class="ti ti-pencil" aria-hidden="true"></i> edit
+        </button>
+      `;
+
+      // Inline edit form, hidden by default.
+      const editForm = document.createElement('div');
+      editForm.className = 'key-edit-form';
+      editForm.style.display = 'none';
+      editForm.innerHTML = `
+        <input type="password" class="key-edit-input" placeholder="paste new key…" autocomplete="off" style="flex:1;font-size:12px;font-family:monospace">
+        <button class="btn-primary key-save-btn" style="font-size:11px">
+          <i class="ti ti-device-floppy" aria-hidden="true"></i> save
+        </button>
+        <button class="btn-ghost key-cancel-btn" style="font-size:11px">cancel</button>
       `;
       container.appendChild(row);
+      container.appendChild(editForm);
+
+      // Wire toggle
+      row.querySelector('.key-edit-btn').onclick = () => {
+        editForm.style.display = editForm.style.display === 'none' ? 'flex' : 'none';
+        if (editForm.style.display === 'flex') editForm.querySelector('.key-edit-input').focus();
+      };
+      editForm.querySelector('.key-cancel-btn').onclick = () => { editForm.style.display = 'none'; };
+      editForm.querySelector('.key-save-btn').onclick = async () => {
+        const val  = editForm.querySelector('.key-edit-input').value.trim();
+        const btn  = editForm.querySelector('.key-save-btn');
+        btn.disabled = true;
+        btn.textContent = 'saving…';
+        try {
+          const r = await fetch('/settings/keys', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, value: val }),
+          });
+          if (!r.ok) throw new Error(await r.text());
+          editForm.style.display = 'none';
+          loadSettings();   // refresh key status + warnings
+        } catch (err) {
+          btn.textContent = 'error — retry';
+          console.error('key save failed:', err);
+        } finally {
+          btn.disabled = false;
+        }
+      };
     });
 
     document.getElementById('env-path-display').textContent = data.env_path || '';
@@ -272,9 +433,41 @@ async function loadSettings() {
     document.getElementById('settings-tok-input').textContent  = formatTokens(t.input  || 0);
     document.getElementById('settings-tok-output').textContent = formatTokens(t.output || 0);
 
-    if (data.defaults?.protocol?.require_steelman) {
+    if (data.config?.protocol?.require_steelman) {
       document.getElementById('s-toggle-steelman').classList.add('on');
       document.getElementById('s-toggle-steelman').setAttribute('aria-checked', 'true');
+    }
+
+    // Populate agent model selects.
+    const agentCfg   = data.config?.agents || {};
+    const keyStatus2 = data.key_status || {};
+    const MODEL_ROLE_MAP = {
+      's-prop-model': agentCfg.proposition?.model || 'claude-sonnet-4-6',
+      's-opp-model':  agentCfg.opposition?.model  || 'gpt-4o',
+      's-mod-model':  agentCfg.moderator?.model   || 'claude-opus-4-8',
+    };
+    Object.entries(MODEL_ROLE_MAP).forEach(([selId, defaultModel]) => {
+      const sel = document.getElementById(selId);
+      if (!sel) return;
+      sel.innerHTML = '';
+      ALL_MODELS.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.value;
+        opt.textContent = keyStatus2[m.provider] ? m.label : `${m.label} (key missing)`;
+        opt.disabled = !keyStatus2[m.provider];
+        sel.appendChild(opt);
+      });
+      sel.value = defaultModel;
+    });
+
+    const hw = data.config?.agent_settings?.history_window;
+    if (hw != null) {
+      const hwEl = document.getElementById('s-history-window');
+      if (hwEl) {
+        hwEl.value = hw;
+        const hwVal = hwEl.nextElementSibling;
+        if (hwVal) hwVal.textContent = hw;
+      }
     }
 
   } catch (e) { console.error('settings load failed', e); }
@@ -286,6 +479,10 @@ async function loadSettings() {
   };
 
   document.getElementById('btn-save-defaults').onclick = async () => {
+    const btn = document.getElementById('btn-save-defaults');
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> saving…';
     const payload = {
       protocol: {
         max_turns:            parseInt(document.getElementById('s-max-turns').value),
@@ -295,12 +492,22 @@ async function loadSettings() {
         min_concessions:      parseInt(document.getElementById('s-min-concessions').value),
         repetition_tolerance: parseInt(document.getElementById('s-rep-tolerance').value),
         require_steelman:     document.getElementById('s-toggle-steelman').classList.contains('on'),
-      }
+      },
+      agent_settings: {
+        history_window: parseInt(document.getElementById('s-history-window').value),
+      },
+      agents: {
+        proposition: { model: document.getElementById('s-prop-model')?.value },
+        opposition:  { model: document.getElementById('s-opp-model')?.value },
+        moderator:   { model: document.getElementById('s-mod-model')?.value },
+      },
     };
     await fetch('/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    btn.innerHTML = '<i class="ti ti-check" aria-hidden="true"></i> saved';
+    setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 1800);
   };
 }

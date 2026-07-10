@@ -1,10 +1,10 @@
 protocol:
-  min_challenges: 2
-  min_concessions: 1
-  max_turns: 8
+  min_challenges: 5
+  min_concessions: 2
+  max_turns: 20
   max_time_minutes: 15
   token_budget: 100000
-  repetition_tolerance: 1
+  repetition_tolerance: 2
   require_full_resolution: false
   require_steelman: false
   max_steelman_attempts: 2
@@ -22,6 +22,9 @@ agents:
     model: claude-opus-4-8
     temperature: 0.3
     auto_generate_title: true
+
+agent_settings:
+  history_window: 6
 
 output:
   generate_markdown: true

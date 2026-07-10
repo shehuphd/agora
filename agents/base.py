@@ -23,11 +23,25 @@ _INJECTION_TAG_RE = re.compile(
 )
 
 # How many recent acts to include verbatim in the prompt history window.
-_HISTORY_WINDOW = 10
+# Older acts are replaced by a compaction summary; claim state is always in the dialogue_state JSON.
+_HISTORY_WINDOW = 6
+
+
+def set_history_window(n: int) -> None:
+    """Update the module-level history window at runtime (called by settings save)."""
+    global _HISTORY_WINDOW
+    _HISTORY_WINDOW = max(2, min(10, int(n)))
 
 # LLM call retry settings (runs inside thread-pool executor, so time.sleep is safe).
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE  = 5   # seconds; attempt n waits _BACKOFF_BASE * 2^n
+
+
+class QuotaExhaustedError(Exception):
+    """Raised when an API provider returns a billing/quota exhaustion error (not a transient rate limit)."""
+    def __init__(self, provider: str, message: str):
+        super().__init__(message)
+        self.provider = provider
 
 
 class BaseAgent:
@@ -39,7 +53,12 @@ class BaseAgent:
         self.model = model
         self.temperature = temperature
         self.config = config
-        self._provider = "anthropic" if model.startswith("claude") else "openai"
+        if model.startswith("claude"):
+            self._provider = "anthropic"
+        elif model.startswith("gemini"):
+            self._provider = "google"
+        else:
+            self._provider = "openai"
         self._temperature_deprecated = False
 
     # ------------------------------------------------------------------
@@ -51,6 +70,8 @@ class BaseAgent:
         system, user = self._build_prompt(state)
         if self._provider == "anthropic":
             raw, input_tok, output_tok = self._call_anthropic(system, user)
+        elif self._provider == "google":
+            raw, input_tok, output_tok = self._call_google(system, user)
         else:
             raw, input_tok, output_tok = self._call_openai(system, user)
         return self._parse_response(raw, state, input_tok, output_tok)
@@ -113,7 +134,7 @@ class BaseAgent:
         lines = []
         for act in acts:
             lines.append(
-                f"[Turn {act.turn}] {act.agent} ({act.agent_role}) — "
+                f"[Turn {act.turn} | act_id:{act.act_id}] {act.agent} ({act.agent_role}) — "
                 f"{act.act_type}: {self._sanitize(act.content)}"
             )
             if act.reason:
@@ -202,10 +223,19 @@ class BaseAgent:
                 return text, response.usage.input_tokens, response.usage.output_tokens
 
             except anthropic.BadRequestError as e:
-                if "temperature" in str(e) and not self._temperature_deprecated:
+                msg = str(e).lower()
+                if "credit" in msg or "balance" in msg or "quota" in msg:
+                    raise QuotaExhaustedError("anthropic", str(e))
+                if "temperature" in msg and not self._temperature_deprecated:
                     self._temperature_deprecated = True
                     last_exc = e
                     continue  # retry immediately without temperature
+                raise
+
+            except anthropic.PermissionDeniedError as e:
+                msg = str(e).lower()
+                if "credit" in msg or "balance" in msg or "quota" in msg:
+                    raise QuotaExhaustedError("anthropic", str(e))
                 raise
 
             except anthropic.RateLimitError as e:
@@ -244,6 +274,8 @@ class BaseAgent:
                 return content, usage.prompt_tokens, usage.completion_tokens
 
             except RateLimitError as e:
+                if "insufficient_quota" in str(e).lower():
+                    raise QuotaExhaustedError("openai", str(e))
                 last_exc = e
                 if attempt < _MAX_ATTEMPTS - 1:
                     time.sleep(_BACKOFF_BASE * (2 ** attempt))
@@ -251,6 +283,53 @@ class BaseAgent:
             except APIStatusError as e:
                 if e.status_code in (500, 502, 503) and attempt < _MAX_ATTEMPTS - 1:
                     last_exc = e
+                    time.sleep(_BACKOFF_BASE * (2 ** attempt))
+                else:
+                    raise
+
+        assert last_exc is not None
+        raise last_exc
+
+    def _call_google(self, system: str, user: str) -> tuple[str, int, int]:
+        """Call Google Gemini API via google-genai SDK. Retries on rate-limit and server errors."""
+        from google import genai
+        from google.genai import types
+        from google.genai import errors as gerrors
+
+        client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+        last_exc: Exception | None = None
+
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                response = client.models.generate_content(
+                    model=self.model,
+                    contents=user,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system or None,
+                        temperature=self.temperature,
+                        max_output_tokens=2048,
+                    ),
+                )
+                text = response.text
+                usage = response.usage_metadata
+                return text, usage.prompt_token_count or 0, usage.candidates_token_count or 0
+
+            except gerrors.ClientError as e:
+                msg = str(e).lower()
+                status = getattr(e, "status", None)
+                if any(k in msg for k in ("billing", "quota", "exhausted", "exceeded")):
+                    raise QuotaExhaustedError("google", str(e))
+                # Transient 429 → retry; other 4xx → raise immediately.
+                if status == 429:
+                    last_exc = e
+                    if attempt < _MAX_ATTEMPTS - 1:
+                        time.sleep(_BACKOFF_BASE * (2 ** attempt))
+                else:
+                    raise
+
+            except gerrors.ServerError as e:
+                last_exc = e
+                if attempt < _MAX_ATTEMPTS - 1:
                     time.sleep(_BACKOFF_BASE * (2 ** attempt))
                 else:
                     raise

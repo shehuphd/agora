@@ -9,18 +9,35 @@ export function esc(str) {
     .replace(/"/g, '&quot;');
 }
 
-// Convert markdown links [text](https://url) to <a> elements. HTTPS only.
+// Apply inline markdown (bold, italic, strikethrough) to already-escaped HTML text.
+function _mdInline(rawText) {
+  const result = [];
+  // Order matters: ~~ first, then ** (before *), then *
+  const re = /~~(.+?)~~|\*\*(.+?)\*\*|\*([^*\n]+?)\*/g;
+  let last = 0, m;
+  while ((m = re.exec(rawText)) !== null) {
+    result.push(esc(rawText.slice(last, m.index)).replace(/\n/g, '<br>'));
+    if (m[1] !== undefined)      result.push(`<del>${esc(m[1]).replace(/\n/g, '<br>')}</del>`);
+    else if (m[2] !== undefined) result.push(`<strong>${esc(m[2]).replace(/\n/g, '<br>')}</strong>`);
+    else if (m[3] !== undefined) result.push(`<em>${esc(m[3]).replace(/\n/g, '<br>')}</em>`);
+    last = m.index + m[0].length;
+  }
+  result.push(esc(rawText.slice(last)).replace(/\n/g, '<br>'));
+  return result.join('');
+}
+
+// Convert markdown links [text](https://url), bold, italic, strikethrough, and newlines to HTML.
 export function renderContent(text) {
   const s = String(text ?? '');
   const parts = [];
   const linkRe = /\[([^\]]+)\]\((https?:\/\/[^)]{1,512})\)/g;
   let last = 0, match;
   while ((match = linkRe.exec(s)) !== null) {
-    parts.push(esc(s.slice(last, match.index)));
+    parts.push(_mdInline(s.slice(last, match.index)));
     parts.push(`<a class="act-link" href="${esc(match[2])}" target="_blank" rel="noopener noreferrer">${esc(match[1])}</a>`);
     last = match.index + match[0].length;
   }
-  parts.push(esc(s.slice(last)));
+  parts.push(_mdInline(s.slice(last)));
   return parts.join('');
 }
 
@@ -60,6 +77,16 @@ export const ACT_LABEL = {
   REJECT_STEELMAN:        'steelman rejected · Opposition must restate',
   MODERATOR_INTERVENTION: 'moderator intervention',
 };
+
+export function appendSystemBubble(iconClass, text) {
+  const feed = document.getElementById('act-feed');
+  if (!feed) return;
+  const div = document.createElement('div');
+  div.className = 'act-bubble act-system';
+  div.innerHTML = `<div class="act-text"><i class="ti ${esc(iconClass)}" aria-hidden="true"></i> ${esc(text)}</div>`;
+  feed.appendChild(div);
+  div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
 
 export function appendActBubble(act) {
   if (act.act_type === 'STATUS')       { appendStatusBubble(act); return; }

@@ -6,7 +6,9 @@ from core.state import DialogueState
 LEGAL_TRANSITIONS_STANDARD: dict[str, list[str]] = {
     "INIT":      ["ASSERT"],            # opening state — only Proposition's first ASSERT is valid
     "ASSERT":    ["CHALLENGE", "CONCEDE"],
-    "CHALLENGE": ["REVISE", "DEFEND", "CONCEDE"],
+    # ASSERT included here so Proposition can open new fronts while challenges remain outstanding.
+    # Without it, an opposition that never concedes can bottleneck the whole debate on one claim.
+    "CHALLENGE": ["REVISE", "DEFEND", "CONCEDE", "ASSERT"],
     "REVISE":    ["CHALLENGE", "CONCEDE", "PROPOSE"],
     "DEFEND":    ["CHALLENGE", "CONCEDE"],
     "CONCEDE":   ["PROPOSE", "ASSERT"],
@@ -20,7 +22,7 @@ LEGAL_TRANSITIONS_RAPOPORT: dict[str, list[str]] = {
     "STEELMAN":         ["ACCEPT_STEELMAN", "REJECT_STEELMAN"],
     "ACCEPT_STEELMAN":  ["CHALLENGE", "CONCEDE"],
     "REJECT_STEELMAN":  ["STEELMAN"],
-    "CHALLENGE":        ["REVISE", "DEFEND", "CONCEDE"],
+    "CHALLENGE":        ["REVISE", "DEFEND", "CONCEDE", "ASSERT"],
     "REVISE":           ["CHALLENGE", "CONCEDE", "PROPOSE"],
     "DEFEND":           ["CHALLENGE", "CONCEDE"],
     "CONCEDE":          ["PROPOSE", "ASSERT"],

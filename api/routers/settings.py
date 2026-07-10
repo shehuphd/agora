@@ -1,12 +1,13 @@
 """Settings router — API key status, config management, token reset."""
+import json
 import os
 import random
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 import yaml
-from fastapi import APIRouter
-from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException
+from dotenv import load_dotenv, set_key as dotenv_set_key
 
 # Domain list for random topic generation. Picked server-side so the LLM
 # can't default to AI / social media regardless of training biases.
@@ -66,8 +67,25 @@ _ENV_PATH = Path(".env").resolve()
 
 router = APIRouter()
 
-CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "defaults.yaml"
-RUNS_DIR = Path(__file__).parent.parent.parent / "runs"
+CONFIG_PATH    = Path(__file__).parent.parent.parent / "config" / "defaults.yaml"
+RUNS_DIR       = Path(__file__).parent.parent.parent / "runs"
+_WARNINGS_PATH = Path(__file__).parent.parent.parent / "config" / "key_warnings.json"
+
+_KEY_ENV_NAMES = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai":    "OPENAI_API_KEY",
+    "google":    "GOOGLE_API_KEY",
+}
+
+
+def _load_key_warnings() -> dict:
+    try:
+        if _WARNINGS_PATH.exists():
+            with open(_WARNINGS_PATH) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
 
 def _load_config() -> dict:
@@ -125,6 +143,8 @@ async def get_settings():
         # absolute path to the .env file (used by app.js open-env link)
         "env_path": str(Path(".env").resolve()),
         "platform": __import__("sys").platform,
+        # providers that recently returned billing-exhaustion errors
+        "key_warnings": _load_key_warnings(),
     }
 
 
@@ -135,6 +155,11 @@ async def update_settings(updates: dict):
     _deep_merge(config, updates)
     with open(CONFIG_PATH, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
+    # Apply agent settings immediately so the running server reflects the change.
+    hw = config.get("agent_settings", {}).get("history_window")
+    if hw is not None:
+        from agents.base import set_history_window
+        set_history_window(hw)
     return {"status": "ok", "config": config}
 
 
@@ -159,6 +184,42 @@ async def reset_tokens():
                 except Exception:
                     continue
     return {"status": "ok", "reset_at": now, "databases_updated": count}
+
+
+@router.post("/settings/keys")
+async def update_key(payload: dict):
+    """Write a single API key to .env. Payload: {provider: str, value: str}."""
+    provider = payload.get("provider", "").lower()
+    value    = (payload.get("value") or "").strip()
+    if provider not in _KEY_ENV_NAMES:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+    env_name = _KEY_ENV_NAMES[provider]
+    # Create .env if it doesn't exist yet.
+    if not _ENV_PATH.exists():
+        _ENV_PATH.touch()
+    dotenv_set_key(str(_ENV_PATH), env_name, value)
+    # Reload so the running process picks up the change immediately.
+    load_dotenv(dotenv_path=_ENV_PATH, override=True)
+    os.environ[env_name] = value
+    # If the key is being set (non-empty), clear any existing quota warning for this provider.
+    if value:
+        warnings = _load_key_warnings()
+        if provider in warnings:
+            del warnings[provider]
+            with open(_WARNINGS_PATH, "w") as f:
+                json.dump(warnings, f)
+    return {"status": "ok", "provider": provider, "key_present": bool(value)}
+
+
+@router.post("/settings/clear-key-warning/{provider}")
+async def clear_key_warning(provider: str):
+    """Clear a quota-exhaustion warning for the given provider."""
+    warnings = _load_key_warnings()
+    if provider in warnings:
+        del warnings[provider]
+        with open(_WARNINGS_PATH, "w") as f:
+            json.dump(warnings, f)
+    return {"status": "ok"}
 
 
 @router.post("/api/open-env")

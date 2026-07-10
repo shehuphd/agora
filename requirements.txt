@@ -5,5 +5,6 @@ pyyaml
 pydantic
 anthropic
 openai
+google-genai
 pytest
 httpx

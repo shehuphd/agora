@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core.state import Act, DialogueState
+from core.export import write_debate_files
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +212,11 @@ def export_markdown(state: DialogueState, run_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def checkpoint(conn: sqlite3.Connection, state: DialogueState, act: Act, run_dir: Path) -> None:
-    """Persist act, update claim statuses, write state.json, and append to debate.md."""
-    write_act_to_db(conn, act)          # durable act record
-    update_claim_statuses(conn, state)  # latest claim statuses
-    write_state_json(state, run_dir)    # full state snapshot
-    append_act_to_markdown(act, run_dir)  # human-readable log
+    """Persist act, update claim statuses, write state.json, debate.json, and debate.md."""
+    write_act_to_db(conn, act)
+    update_claim_statuses(conn, state)
+    write_state_json(state, run_dir)
+    write_debate_files(state, run_dir)  # rewrites debate.json + debate.md from full state
 
 
 # ---------------------------------------------------------------------------

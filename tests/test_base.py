@@ -146,17 +146,17 @@ class TestRollingHistory:
 
     def test_beyond_window_adds_summary(self):
         agent = _FakeAgent()
-        acts = [_act(turn=i) for i in range(15)]
+        acts = [_act(turn=i) for i in range(10)]
         state = _state(acts=acts)
         result = agent._format_act_history(state)
         assert "omitted" in result
-        assert "5 earlier act" in result  # 15 - 10 = 5 omitted
+        assert "4 earlier act" in result  # 10 - 6 = 4 omitted
 
     def test_beyond_window_shows_recent_acts(self):
         agent = _FakeAgent()
-        acts = [_act(turn=i, content=f"content-{i}") for i in range(15)]
+        acts = [_act(turn=i, content=f"content-{i}") for i in range(10)]
         state = _state(acts=acts)
         result = agent._format_act_history(state)
-        # Last 10 acts (turns 5-14) should be visible
-        assert "Turn 14" in result
-        assert "Turn 4" not in result
+        # Last 6 acts (turns 4-9) should be visible
+        assert "Turn 9" in result
+        assert "Turn 3" not in result

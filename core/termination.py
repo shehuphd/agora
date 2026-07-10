@@ -32,14 +32,6 @@ def check_termination(state: DialogueState, config: dict) -> tuple[bool, str | N
     if total_tokens >= token_budget:
         return True, f"token_budget exhausted ({total_tokens}/{token_budget} tokens)"
 
-    # Hard stop: all claims resolved and no outstanding challenges
-    if state.claims and not state.outstanding_challenges:
-        all_resolved = all(
-            c.status in TERMINAL_STATUSES for c in state.claims.values()
-        )
-        if all_resolved:
-            return True, "all claims resolved with no outstanding challenges"
-
     # --- Soft stops ---
 
     # Soft stop: too few challenges issued across the whole debate.

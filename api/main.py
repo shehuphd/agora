@@ -20,6 +20,11 @@ async def lifespan(app: FastAPI):
     missing = [k for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY") if not os.getenv(k)]
     if missing:
         print(f"[agora] WARNING: missing API keys: {missing}. Add them to .env.", flush=True)
+    # Apply persisted agent settings at startup.
+    from agents.base import set_history_window
+    cfg = settings_router._load_config()
+    hw = cfg.get("agent_settings", {}).get("history_window", 6)
+    set_history_window(hw)
     yield
 
 

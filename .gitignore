@@ -10,3 +10,9 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Internal docs — not for public repo
+agora-prd.md
+agora-code-brief.md
+agora-claude-code-brief.md
+agora-ui-guidance.md

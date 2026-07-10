@@ -18,11 +18,11 @@
   <a class="nav-tab" href="#/new">new debate</a>
   <a class="nav-tab" href="#/settings">settings</a>
   <div class="nav-right">
-    <div class="nav-token-chip">
+    <a class="nav-token-chip" href="#/settings">
       <i class="ti ti-cpu" aria-hidden="true"></i>
       all-time
       <span class="nav-token-val" id="nav-token-total">0</span>
-    </div>
+    </a>
   </div>
 </nav>
 
@@ -57,8 +57,11 @@
   <div id="history-table-wrap" style="display:none">
     <div class="export-bar" id="export-bar" style="display:none">
       <span class="export-bar-count" id="export-sel-count">0 selected</span>
-      <button class="btn-ghost btn-sm" id="btn-export-selected">
-        <i class="ti ti-download" aria-hidden="true"></i> export selected
+      <button class="btn-ghost btn-sm" id="btn-export-selected-json">
+        <i class="ti ti-download" aria-hidden="true"></i> export JSON
+      </button>
+      <button class="btn-ghost btn-sm" id="btn-export-selected-md">
+        <i class="ti ti-markdown" aria-hidden="true"></i> export MD
       </button>
       <button class="btn-ghost btn-sm" id="btn-deselect-all">clear</button>
     </div>
@@ -67,12 +70,12 @@
         <tr>
           <th class="col-check"><input type="checkbox" id="check-all" title="select all"></th>
           <th>run id</th>
-          <th>title</th>
+          <th class="sortable" data-sort="title">title <span class="sort-icon"></span></th>
           <th>participants</th>
-          <th>turns</th>
-          <th>tokens</th>
+          <th class="sortable" data-sort="turns">turns <span class="sort-icon"></span></th>
+          <th class="sortable" data-sort="tokens">tokens <span class="sort-icon"></span></th>
           <th>mode</th>
-          <th>status</th>
+          <th class="sortable" data-sort="status">status <span class="sort-icon"></span></th>
           <th></th>
         </tr>
       </thead>
@@ -136,7 +139,7 @@
             <select id="prop-model" name="prop_model"></select>
           </div>
           <div class="field-row">
-            <label class="field-label">temperature <span class="slider-readout" id="prop-temp-out">0.7</span></label>
+            <label class="field-label" data-tooltip="How creative the proposition's responses are. 0.0 = deterministic and focused; 1.0 = more varied and exploratory. Higher values improve argument diversity but reduce consistency.">temperature <span class="slider-readout" id="prop-temp-out">0.7</span></label>
             <input type="range" min="0" max="10" value="7" step="1" name="prop_temperature"
               oninput="document.getElementById('prop-temp-out').textContent=(this.value/10).toFixed(1)">
           </div>
@@ -161,14 +164,12 @@
             <select id="opp-model" name="opp_model"></select>
           </div>
           <div class="field-row">
-            <label class="field-label">temperature <span class="slider-readout" id="opp-temp-out">0.4</span></label>
+            <label class="field-label" data-tooltip="How creative the opposition's responses are. 0.0 = deterministic and focused; 1.0 = more varied. Slightly lower than the proposition is usually optimal for consistent scrutiny.">temperature <span class="slider-readout" id="opp-temp-out">0.4</span></label>
             <input type="range" min="0" max="10" value="4" step="1" name="opp_temperature"
               oninput="document.getElementById('opp-temp-out').textContent=(this.value/10).toFixed(1)">
           </div>
           <div class="field-row">
-            <label class="field-label">aggression <span class="slider-readout" id="opp-agg-out">0.8</span>
-              <!-- 0.0 = only clear errors; 1.0 = challenge every borderline claim -->
-            </label>
+            <label class="field-label" data-tooltip="How aggressively the opposition scrutinises claims. 0.0 = only clear factual errors; 1.0 = challenges every borderline claim and demands high evidentiary standards across all angles.">aggression <span class="slider-readout" id="opp-agg-out">0.8</span></label>
             <input type="range" min="0" max="10" value="8" step="1" name="opp_aggression"
               oninput="document.getElementById('opp-agg-out').textContent=(this.value/10).toFixed(1)">
           </div>
@@ -199,7 +200,7 @@
               onclick="this.classList.toggle('on');this.setAttribute('aria-checked',this.classList.contains('on'))"></button>
           </div>
           <div class="toggle-row">
-            <span class="toggle-label">require full resolution before closing</span>
+            <span class="toggle-label" data-tooltip="When on, the debate continues until all outstanding challenges are fully resolved — even if the token or turn budget is reached. Can significantly extend run time and cost.">require full resolution before closing</span>
             <button type="button" class="toggle" role="switch" aria-checked="false"
               id="toggle-full-resolution"
               onclick="this.classList.toggle('on');this.setAttribute('aria-checked',this.classList.contains('on'))"></button>
@@ -229,54 +230,54 @@
       <div class="two-col">
         <div>
           <div class="thresh-row">
-            <span class="thresh-label">max turns</span>
             <div class="thresh-right">
-              <input type="range" min="8" max="30" value="15" step="1" name="max_turns"
+              <input type="range" min="8" max="100" value="20" step="1" name="max_turns"
                 oninput="this.nextElementSibling.textContent=this.value">
-              <span class="thresh-val">15</span>
+              <span class="thresh-val">20</span>
             </div>
+            <span class="thresh-label" data-tooltip="Maximum proposition–opposition exchange cycles. Each turn = one full assert/challenge cycle. More turns allow deeper exploration but consume more tokens.">max turns</span>
           </div>
           <div class="thresh-row">
-            <span class="thresh-label">max time (min)</span>
             <div class="thresh-right">
               <input type="range" min="1" max="60" value="15" step="1" name="max_time"
                 oninput="this.nextElementSibling.textContent=this.value">
               <span class="thresh-val">15</span>
             </div>
+            <span class="thresh-label" data-tooltip="Hard wall-clock limit in minutes. The debate auto-closes when this is exceeded, regardless of how many turns remain.">max time (min)</span>
           </div>
           <div class="thresh-row">
-            <span class="thresh-label">token budget (k)</span>
             <div class="thresh-right">
               <input type="range" min="10" max="500" value="40" step="10" name="token_budget"
                 oninput="this.nextElementSibling.textContent=this.value+'k'">
               <span class="thresh-val">40k</span>
             </div>
+            <span class="thresh-label" data-tooltip="Total token allowance across all agents. One token ≈ 0.75 words. 100k supports a solid 10–15 turn debate; 300k+ enables long-form multi-round exchanges.">token budget (k)</span>
           </div>
         </div>
         <div>
           <div class="thresh-row">
-            <span class="thresh-label">min challenges</span>
             <div class="thresh-right">
-              <input type="range" min="1" max="8" value="3" step="1" name="min_challenges"
+              <input type="range" min="1" max="20" value="5" step="1" name="min_challenges"
                 oninput="this.nextElementSibling.textContent=this.value">
-              <span class="thresh-val">3</span>
+              <span class="thresh-val">5</span>
             </div>
+            <span class="thresh-label" data-tooltip="Opposition must raise at least this many challenges before it can concede. Higher values force multi-angle scrutiny and prevent premature capitulation.">min challenges</span>
           </div>
           <div class="thresh-row">
-            <span class="thresh-label">min concessions</span>
             <div class="thresh-right">
-              <input type="range" min="0" max="5" value="1" step="1" name="min_concessions"
+              <input type="range" min="0" max="10" value="2" step="1" name="min_concessions"
                 oninput="this.nextElementSibling.textContent=this.value">
-              <span class="thresh-val">1</span>
+              <span class="thresh-val">2</span>
             </div>
+            <span class="thresh-label" data-tooltip="Opposition must grant at least this many concessions before the debate can reach full resolution. Set to 0 to allow closure on any termination condition.">min concessions</span>
           </div>
           <div class="thresh-row">
-            <span class="thresh-label">repetition tolerance</span>
             <div class="thresh-right">
-              <input type="range" min="0" max="5" value="1" step="1" name="rep_tolerance"
+              <input type="range" min="0" max="10" value="2" step="1" name="rep_tolerance"
                 oninput="this.nextElementSibling.textContent=this.value">
-              <span class="thresh-val">1</span>
+              <span class="thresh-val">2</span>
             </div>
+            <span class="thresh-label" data-tooltip="How many times the proposition can re-assert a previously revised claim before the debate closes on a repetition loop. Set to 0 for zero tolerance.">repetition tolerance</span>
           </div>
         </div>
       </div>
@@ -335,8 +336,11 @@
         <button class="btn-primary btn-sm" id="btn-rerun" style="display:none">
           <i class="ti ti-refresh" aria-hidden="true"></i> rerun with same settings
         </button>
-        <button class="btn-solid btn-sm" id="btn-export-debate">
-          <i class="ti ti-download" aria-hidden="true"></i> export JSON
+        <button class="btn-solid btn-sm" id="btn-export-debate-json">
+          <i class="ti ti-download" aria-hidden="true"></i> JSON
+        </button>
+        <button class="btn-solid btn-sm" id="btn-export-debate-md">
+          <i class="ti ti-markdown" aria-hidden="true"></i> .MD
         </button>
       </div>
     </div>
@@ -344,6 +348,7 @@
       <div>
         <h1 class="dh-title" id="dh-title">loading...</h1>
         <p class="dh-id" id="dh-id"></p>
+        <div class="dh-chips" id="dh-chips"></div>
       </div>
       <div class="dh-controls">
         <span class="badge-live" id="dh-turn-badge">turn 0</span>
@@ -403,9 +408,26 @@
   </div>
 
   <div class="override-bar" id="override-bar">
-    <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
-    <span class="override-label">mid-run override available · <span id="override-count">0</span> applied this run</span>
-    <button class="override-btn" id="btn-override">apply override</button>
+    <div class="override-bar-header">
+      <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
+      <span class="override-label">mid-run override · <span id="override-count">0</span> applied this run</span>
+      <button class="override-btn" id="btn-override">adjust settings</button>
+    </div>
+    <div class="override-panel" id="override-panel" style="display:none">
+      <div class="override-field">
+        <label class="override-field-label">Token budget — current: <span id="override-current-budget">—</span></label>
+        <div class="override-field-row">
+          <input type="number" id="override-budget-input" class="override-input" min="1000" max="500000" step="1000" placeholder="new total">
+          <button class="override-quick-btn" data-delta="10000">+10k</button>
+          <button class="override-quick-btn" data-delta="20000">+20k</button>
+          <button class="override-quick-btn" data-delta="40000">+40k</button>
+        </div>
+      </div>
+      <div class="override-panel-actions">
+        <button class="btn-primary btn-sm" id="btn-override-apply">apply</button>
+        <button class="btn-ghost btn-sm" id="btn-override-cancel">cancel</button>
+      </div>
+    </div>
   </div>
 
   <div class="sec-head">act log</div>
@@ -462,6 +484,23 @@
   </div>
 
   <div class="card">
+    <div class="card-title"><i class="ti ti-robot" aria-hidden="true"></i> agent model defaults</div>
+    <p class="pg-sub" style="margin-bottom:12px">Default models assigned to each role when starting a new debate.</p>
+    <div class="field-row">
+      <label class="field-label" for="s-prop-model">proposition</label>
+      <select class="model-select" id="s-prop-model"></select>
+    </div>
+    <div class="field-row" style="margin-top:8px">
+      <label class="field-label" for="s-opp-model">opposition</label>
+      <select class="model-select" id="s-opp-model"></select>
+    </div>
+    <div class="field-row" style="margin-top:8px">
+      <label class="field-label" for="s-mod-model">moderator</label>
+      <select class="model-select" id="s-mod-model"></select>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-title"><i class="ti ti-shield-check" aria-hidden="true"></i> protocol defaults</div>
     <div class="toggle-row" style="margin-bottom:4px">
       <div>
@@ -479,55 +518,66 @@
     <div class="two-col">
       <div>
         <div class="thresh-row">
-          <span class="thresh-label">max turns</span>
           <div class="thresh-right">
-            <input type="range" min="8" max="30" value="15" step="1" id="s-max-turns"
+            <input type="range" min="8" max="100" value="20" step="1" id="s-max-turns"
               oninput="this.nextElementSibling.textContent=this.value">
-            <span class="thresh-val">15</span>
+            <span class="thresh-val">20</span>
           </div>
+          <span class="thresh-label" data-tooltip="Maximum proposition–opposition exchange cycles. Each turn = one full assert/challenge cycle. More turns allow deeper exploration but consume more tokens.">max turns</span>
         </div>
         <div class="thresh-row">
-          <span class="thresh-label">max time (min)</span>
           <div class="thresh-right">
             <input type="range" min="1" max="60" value="15" step="1" id="s-max-time"
               oninput="this.nextElementSibling.textContent=this.value">
             <span class="thresh-val">15</span>
           </div>
+          <span class="thresh-label" data-tooltip="Hard wall-clock limit in minutes. The debate auto-closes when this is exceeded, regardless of how many turns remain.">max time (min)</span>
         </div>
         <div class="thresh-row">
-          <span class="thresh-label">token budget (k)</span>
           <div class="thresh-right">
             <input type="range" min="10" max="500" value="40" step="10" id="s-token-budget"
               oninput="this.nextElementSibling.textContent=this.value+'k'">
             <span class="thresh-val">40k</span>
           </div>
+          <span class="thresh-label" data-tooltip="Total token allowance across all agents. One token ≈ 0.75 words. 100k supports a solid 10–15 turn debate; 300k+ enables long-form multi-round exchanges.">token budget (k)</span>
         </div>
       </div>
       <div>
         <div class="thresh-row">
-          <span class="thresh-label">min challenges</span>
           <div class="thresh-right">
-            <input type="range" min="1" max="8" value="3" step="1" id="s-min-challenges"
+            <input type="range" min="1" max="20" value="5" step="1" id="s-min-challenges"
               oninput="this.nextElementSibling.textContent=this.value">
-            <span class="thresh-val">3</span>
+            <span class="thresh-val">5</span>
           </div>
+          <span class="thresh-label" data-tooltip="Opposition must raise at least this many challenges before it can concede. Higher values force multi-angle scrutiny and prevent premature capitulation.">min challenges</span>
         </div>
         <div class="thresh-row">
-          <span class="thresh-label">min concessions</span>
           <div class="thresh-right">
-            <input type="range" min="0" max="5" value="1" step="1" id="s-min-concessions"
+            <input type="range" min="0" max="10" value="2" step="1" id="s-min-concessions"
               oninput="this.nextElementSibling.textContent=this.value">
-            <span class="thresh-val">1</span>
+            <span class="thresh-val">2</span>
           </div>
+          <span class="thresh-label" data-tooltip="Opposition must grant at least this many concessions before the debate can reach full resolution. Set to 0 to allow closure on any termination condition.">min concessions</span>
         </div>
         <div class="thresh-row">
-          <span class="thresh-label">repetition tolerance</span>
           <div class="thresh-right">
-            <input type="range" min="0" max="5" value="1" step="1" id="s-rep-tolerance"
+            <input type="range" min="0" max="10" value="2" step="1" id="s-rep-tolerance"
               oninput="this.nextElementSibling.textContent=this.value">
-            <span class="thresh-val">1</span>
+            <span class="thresh-val">2</span>
           </div>
+          <span class="thresh-label" data-tooltip="How many times the proposition can re-assert a previously revised claim before the debate closes on a repetition loop. Set to 0 for zero tolerance.">repetition tolerance</span>
         </div>
+      </div>
+    </div>
+    <div class="thresh-row" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+      <div class="thresh-right">
+        <input type="range" min="2" max="10" value="6" step="1" id="s-history-window"
+          oninput="this.nextElementSibling.textContent=this.value">
+        <span class="thresh-val">6</span>
+      </div>
+      <div>
+        <span class="thresh-label">rolling history window</span>
+        <p class="field-hint" style="margin-top:3px;margin-bottom:0">How many recent acts each agent sees verbatim. Older acts are compacted to a summary. Lower = cheaper per turn; higher = richer context. Default: 6, max: 10.</p>
       </div>
     </div>
     <div class="form-actions" style="margin-top:12px">

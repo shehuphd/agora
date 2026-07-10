@@ -102,11 +102,11 @@ def test_illegal_assert_after_assert():
         validate_act(state, "ASSERT")
 
 
-def test_illegal_assert_after_challenge():
-    """ASSERT cannot follow CHALLENGE phase."""
+def test_legal_assert_after_challenge():
+    """ASSERT is now legal after CHALLENGE — Proposition may open new fronts while
+    challenges are outstanding rather than being bottlenecked on a single claim."""
     state = _make_state("challenge")
-    with pytest.raises(ValueError):
-        validate_act(state, "ASSERT")
+    validate_act(state, "ASSERT")  # must not raise
 
 
 def test_illegal_challenge_after_concede():

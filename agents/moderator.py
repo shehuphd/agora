@@ -40,15 +40,21 @@ Hard stops — emit CLOSE immediately if any are true:
   - turns_used >= max_turns
   - elapsed_minutes >= max_time_minutes
   - total_tokens >= token_budget
-  - all claims are settled and outstanding_challenges is empty (full_concession or all_claims_closed)
 
 Soft stops — emit CLOSE if the dialogue has reached a natural end:
-  - a PROPOSE act received a CONCEDE response from Opposition (full_concession)
+  - a PROPOSE act received a CONCEDE response from Opposition (mutual agreement to close)
   - repetition_count > repetition_tolerance (repetition_loop)
   - the runner's dialogue_state says should_close = true (honour the runner signal)
 
+CRITICAL — do NOT close on empty outstanding_challenges:
+  An empty outstanding_challenges list means the opposition conceded its most recent
+  challenge. This is NOT a termination signal. The opposition is expected to raise a new
+  challenge next turn, and the proposition to assert a new sub-claim. The debate is
+  designed to continue until the token or turn budget is exhausted — not to end when
+  one round of challenge-defend-concede completes. Only close on the conditions above.
+
 The runner sends a should_close signal in the user message. When should_close is true,
-you MUST emit CLOSE. You may also close independently on a hard stop or full concession.
+you MUST emit CLOSE. You may also close independently on a hard stop.
 
 REPETITION DETECTION
 Compare each new ASSERT or REVISE claim against previously revised claims.
@@ -81,7 +87,7 @@ OUTPUT FORMAT — STATUS (no other text, no markdown fences):
 OUTPUT FORMAT — CLOSE (no other text, no markdown fences):
 {
   "act_type": "CLOSE",
-  "closure_reason": "max_turns" | "max_time" | "token_budget" | "all_claims_closed" | "challenge_rate_floor" | "full_concession" | "repetition_loop",
+  "closure_reason": "max_turns" | "max_time" | "token_budget" | "challenge_rate_floor" | "mutual_agreement" | "repetition_loop",
   "closure_summary": "string (one paragraph explaining why the debate closed now)",
   "surviving_claims": ["claim_id", ...],
   "revised_claims": ["claim_id", ...],
@@ -158,9 +164,19 @@ class ModeratorAgent(BaseAgent):
             "sourcing_warning": sourcing_warning,
         }, indent=2)
 
+        _CLOSURE_LABELS = {
+            "user_requested_end": "The debate was ended early by the user. Acknowledge this in your closure summary.",
+            "max_turns":          "The maximum turn count has been reached.",
+            "max_time":           "The time limit has been reached.",
+            "token_budget":       "The token budget has been exhausted.",
+            "mutual_agreement":   "Both parties have reached mutual agreement.",
+            "repetition_loop":    "A repetition loop was detected.",
+            "challenge_rate_floor": "The challenge rate fell below the minimum threshold.",
+        }
+        closure_label = _CLOSURE_LABELS.get(closure_reason, closure_reason or "debate concluded")
         close_directive = (
             f"\nIMPORTANT: The runner has signalled that the debate must now CLOSE. "
-            f"Reason: {closure_reason}. Emit a CLOSE act."
+            f"{closure_label} Emit a CLOSE act."
         ) if should_close else ""
 
         user = f"""\

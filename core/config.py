@@ -39,23 +39,32 @@ class DebateRunConfig:
 
     @classmethod
     def from_api(cls, c: object) -> "DebateRunConfig":
-        """Convert a Pydantic DebateConfig (from api/models.py) to a run config."""
+        """Convert a Pydantic DebateConfig (from api/models.py) to a run config.
+
+        The new-debate form sends short-name keys (prop_model, opp_model, etc.)
+        while the canonical model fields use long names (proposition_model, etc.).
+        Short names take priority when non-None; long-name fields provide defaults.
+        """
+        def _pick(short, long, fallback):
+            v = getattr(c, short, None)
+            return v if v is not None else getattr(c, long, fallback)
+
         return cls(
             topic=c.topic,
             debate_title=getattr(c, "debate_title", None) or f"Debate: {c.topic[:60]}",
             proposition=AgentRunConfig(
-                model=getattr(c, "proposition_model", "claude-sonnet-4-6"),
-                temperature=getattr(c, "temperature_proposition", 0.7),
-                nickname=getattr(c, "proposition_nickname", "Thesis"),
+                model=_pick("prop_model",     "proposition_model",     "claude-sonnet-4-6"),
+                temperature=_pick("prop_temperature", "temperature_proposition", 0.7),
+                nickname=_pick("prop_nickname", "proposition_nickname", "Thesis"),
             ),
             opposition=AgentRunConfig(
-                model=getattr(c, "opposition_model", "gpt-4o"),
-                temperature=getattr(c, "temperature_opposition", 0.4),
-                nickname=getattr(c, "opposition_nickname", "Antithesis"),
-                aggression=getattr(c, "aggression", 0.8),
+                model=_pick("opp_model",     "opposition_model",     "gpt-4o"),
+                temperature=_pick("opp_temperature", "temperature_opposition", 0.4),
+                nickname=_pick("opp_nickname", "opposition_nickname", "Antithesis"),
+                aggression=_pick("opp_aggression", "aggression", 0.8),
             ),
             moderator=AgentRunConfig(
-                model=getattr(c, "moderator_model", "claude-opus-4-8"),
+                model=_pick("mod_model", "moderator_model", "claude-opus-4-8"),
                 temperature=getattr(c, "temperature_moderator", 0.3),
                 nickname="Moderator",
             ),

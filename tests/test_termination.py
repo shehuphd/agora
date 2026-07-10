@@ -83,8 +83,9 @@ def test_token_budget_not_exhausted():
     assert should_close is False
 
 
-def test_all_claims_resolved_hard_stop():
-    """Hard stop: all claims in terminal status with no outstanding challenges."""
+def test_all_claims_resolved_does_not_close():
+    """Empty outstanding_challenges with all-terminal claims is NOT a stop condition.
+    Debates run until token/turn budget — a concession clears a challenge, not the debate."""
     now = datetime.utcnow().isoformat()
     claims = {
         "c1": Claim("c1", "test", "proposition", "Claim one",   "conceded", now),
@@ -92,21 +93,8 @@ def test_all_claims_resolved_hard_stop():
         "c3": Claim("c3", "test", "opposition",  "Claim three", "contested", now),
     }
     state = _make_state(claims=claims, outstanding_challenges=[])
-    should_close, reason = check_termination(state, _base_config())
-    assert should_close is True
-    assert "resolved" in reason.lower()
-
-
-def test_open_claim_prevents_all_resolved_stop():
-    """No all-resolved stop when at least one claim is still open."""
-    now = datetime.utcnow().isoformat()
-    claims = {
-        "c1": Claim("c1", "test", "proposition", "Resolved claim", "conceded", now),
-        "c2": Claim("c2", "test", "proposition", "Open claim",     "open",     now),
-    }
-    state = _make_state(claims=claims, outstanding_challenges=[])
     should_close, _ = check_termination(state, _base_config())
-    assert should_close is False
+    assert should_close is False  # no budget/turn limits hit — debate continues
 
 
 # --- Soft stops ---
