@@ -67,6 +67,32 @@ export async function loadHistory() {
     document.getElementById('btn-export-selected-json').onclick = () => _batchExport('json');
     document.getElementById('btn-export-selected-md').onclick   = () => _batchExport('markdown');
 
+    // Two-click confirm delete
+    let _deleteConfirmTimer = null;
+    document.getElementById('btn-delete-selected').onclick = async () => {
+      const btn = document.getElementById('btn-delete-selected');
+      if (btn.dataset.confirming !== 'true') {
+        btn.dataset.confirming = 'true';
+        btn.innerHTML = '<i class="ti ti-alert-triangle" aria-hidden="true"></i> confirm delete?';
+        _deleteConfirmTimer = setTimeout(() => {
+          btn.dataset.confirming = '';
+          btn.innerHTML = '<i class="ti ti-trash" aria-hidden="true"></i> delete';
+        }, 5000);
+        return;
+      }
+      clearTimeout(_deleteConfirmTimer);
+      btn.dataset.confirming = '';
+      btn.disabled = true;
+      btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> deleting…';
+      await fetch('/debates/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [...selected] }),
+      });
+      selected.clear();
+      await loadHistory();
+    };
+
     // --- Sorting ---
 
     const SORT_KEY = {

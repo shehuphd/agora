@@ -308,6 +308,29 @@ async def export_debate(session_id: str, format: str = "json"):
     )
 
 
+@router.post("/debates/delete")
+async def batch_delete(body: dict):
+    """Delete multiple debate run directories. Body: {"ids": [...]}
+    Refuses to delete any session that is currently running."""
+    import shutil
+    ids = body.get("ids") or []
+    deleted, skipped = [], []
+    for sid in ids:
+        if sid in _session_queues:
+            skipped.append({"id": sid, "reason": "running"})
+            continue
+        db_path = _find_db(sid)
+        if not db_path:
+            skipped.append({"id": sid, "reason": "not_found"})
+            continue
+        try:
+            shutil.rmtree(db_path.parent)
+            deleted.append(sid)
+        except Exception as exc:
+            skipped.append({"id": sid, "reason": str(exc)})
+    return {"status": "ok", "deleted": deleted, "skipped": skipped}
+
+
 @router.post("/debates/export")
 async def batch_export(body: dict):
     """Download multiple debates as JSON or Markdown. Body: {"ids": [...], "format": "json"|"markdown"}"""
