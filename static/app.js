@@ -69,9 +69,43 @@ async function loadNavTokenTotal() {
     const data = await res.json();
     document.getElementById('nav-token-total').textContent =
       formatTokens(data.token_totals?.total || 0);
-    const anyMissing = Object.values(data.key_status || {}).some(v => !v);
-    const banner = document.getElementById('key-banner');
-    if (banner) banner.style.display = anyMissing ? 'flex' : 'none';
+    const keyInfo    = data.key_info || {};
+    const agentsCfg  = data.config?.agents || {};
+    const hasAnyValid = Object.values(keyInfo).some(i => i.valid);
+    const invalidProviders = Object.entries(keyInfo)
+      .filter(([, i]) => i.present && !i.valid).map(([p]) => p);
+    const mismatchedRoles = [
+      ['proposition', agentsCfg.proposition?.model],
+      ['opposition',  agentsCfg.opposition?.model],
+      ['moderator',   agentsCfg.moderator?.model],
+    ].filter(([, m]) => { const p = _providerForModel(m); return p && !keyInfo[p]?.valid; })
+     .map(([role]) => role);
+
+    const banner     = document.getElementById('key-banner');
+    const bannerMsg  = document.getElementById('key-banner-msg');
+    const bannerLink = document.getElementById('key-banner-link');
+    if (banner && bannerMsg && bannerLink) {
+      if (!hasAnyValid) {
+        bannerMsg.textContent  = 'No working API key found — add at least one to start debates.';
+        bannerLink.textContent = 'add a key in settings';
+        bannerLink.href        = '#/settings';
+        banner.style.display   = 'flex';
+      } else if (invalidProviders.length > 0) {
+        const names  = invalidProviders.map(p => p.toUpperCase() + '_API_KEY');
+        const plural = names.length > 1;
+        bannerMsg.textContent  = `${names.join(' and ')} ${plural ? 'are' : 'is'} invalid — edit or remove ${plural ? 'them' : 'it'}.`;
+        bannerLink.textContent = 'go to settings';
+        bannerLink.href        = '#/settings';
+        banner.style.display   = 'flex';
+      } else if (mismatchedRoles.length > 0) {
+        bannerMsg.textContent  = `The model assigned to ${mismatchedRoles.join(', ')} has no valid API key.`;
+        bannerLink.textContent = 'change model defaults';
+        bannerLink.href        = '#/settings';
+        banner.style.display   = 'flex';
+      } else {
+        banner.style.display   = 'none';
+      }
+    }
   } catch (e) {
     console.warn('nav token load failed', e);
   }
@@ -197,11 +231,20 @@ async function loadNew() {
     }
   } catch (e) { /* defaults — all disabled */ }
 
+  const _firstValid = () => ALL_MODELS.find(m => keyStatus[m.provider])?.value || null;
+
   const DEFAULTS = {
     'prop-model': agentCfg.proposition?.model || 'claude-sonnet-4-6',
     'opp-model':  agentCfg.opposition?.model  || 'gpt-4o',
     'mod-model':  agentCfg.moderator?.model   || 'claude-opus-4-8',
   };
+  // If a default model's provider has no valid key, fall back to the first available model.
+  Object.keys(DEFAULTS).forEach(id => {
+    const provider = _providerForModel(DEFAULTS[id]);
+    if (provider && !keyStatus[provider]) {
+      DEFAULTS[id] = _firstValid() || DEFAULTS[id];
+    }
+  });
 
   ['prop-model', 'opp-model', 'mod-model'].forEach(id => {
     const sel = document.getElementById(id);
@@ -347,12 +390,23 @@ async function loadSettings() {
     });
 
     Object.entries(KEY_MAP).forEach(([provider, envName]) => {
-      const ok   = data.key_status?.[provider];
+      const info = data.key_info?.[provider] || { present: false, valid: false, error: null };
       const warn = warnings[provider];
 
       const row = document.createElement('div');
       row.className = 'key-row';
       row.dataset.provider = provider;
+
+      let statusHtml;
+      if (info.valid) {
+        statusHtml = `<span class="key-status-ok"><i class="ti ti-check" aria-hidden="true"></i> valid</span>`;
+      } else if (info.present) {
+        const errText = info.error ? esc(info.error.length > 45 ? info.error.slice(0, 45) + '…' : info.error) : 'check your key';
+        statusHtml = `<span class="key-status-invalid"><i class="ti ti-x" aria-hidden="true"></i> invalid</span>`
+                   + `<span class="key-status-error">${errText}</span>`;
+      } else {
+        statusHtml = `<span class="key-status-missing"><i class="ti ti-minus" aria-hidden="true"></i> missing</span>`;
+      }
 
       const warnHtml = warn
         ? `<span class="key-warn" title="Quota or credit exhausted on ${new Date(warn).toLocaleString()}">
@@ -367,10 +421,7 @@ async function loadSettings() {
 
       row.innerHTML = `
         <span class="key-name">${esc(envName)}</span>
-        <span class="${ok ? 'key-status-ok' : 'key-status-missing'}">
-          <i class="ti ${ok ? 'ti-check' : 'ti-x'}" aria-hidden="true"></i>
-          ${ok ? 'present' : 'missing'}
-        </span>
+        ${statusHtml}
         ${usedByHtml}
         ${warnHtml}
         <button class="btn-ghost key-edit-btn" data-provider="${esc(provider)}" style="font-size:11px;margin-left:auto">

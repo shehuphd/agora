@@ -1,13 +1,90 @@
 """Settings router — API key status, config management, token reset."""
+import asyncio
 import json
 import os
 import random
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 import yaml
 from fastapi import APIRouter, HTTPException
 from dotenv import load_dotenv, set_key as dotenv_set_key
+
+# ------------------------------------------------------------------
+# Key validation cache — avoids an API round-trip on every page load.
+# Cache entries expire after 60 s or when the key value changes.
+# ------------------------------------------------------------------
+_key_cache: dict = {}  # {provider: {"key": str, "result": dict, "ts": float}}
+_CACHE_TTL = 60  # seconds
+
+
+def _test_anthropic_key(value: str) -> dict:
+    try:
+        import anthropic
+        anthropic.Anthropic(api_key=value).models.list(limit=1)
+        return {"present": True, "valid": True, "error": None}
+    except Exception as e:
+        msg = str(e).lower()
+        friendly = "Invalid API key" if any(w in msg for w in ("auth", "invalid", "unauthorized", "403", "401")) else str(e)[:60]
+        return {"present": True, "valid": False, "error": friendly}
+
+
+def _test_openai_key(value: str) -> dict:
+    try:
+        from openai import OpenAI
+        OpenAI(api_key=value).models.list()
+        return {"present": True, "valid": True, "error": None}
+    except Exception as e:
+        msg = str(e).lower()
+        friendly = "Invalid API key" if any(w in msg for w in ("auth", "invalid", "unauthorized", "incorrect", "403", "401")) else str(e)[:60]
+        return {"present": True, "valid": False, "error": friendly}
+
+
+def _test_google_key(value: str) -> dict:
+    try:
+        from google import genai
+        client = genai.Client(api_key=value)
+        for _ in client.models.list():
+            break
+        return {"present": True, "valid": True, "error": None}
+    except Exception as e:
+        msg = str(e).lower()
+        friendly = "Invalid API key" if any(w in msg for w in ("api_key_invalid", "invalid", "unauthorized", "forbidden", "403", "401")) else str(e)[:60]
+        return {"present": True, "valid": False, "error": friendly}
+
+
+async def _validate_all_keys(keys: dict) -> dict:
+    """Validate all API keys concurrently; uses a 60 s per-value cache."""
+    now = time.time()
+    result = {}
+    to_validate = {}
+
+    for provider, value in keys.items():
+        if not value:
+            result[provider] = {"present": False, "valid": False, "error": None}
+            continue
+        cached = _key_cache.get(provider)
+        if cached and cached["key"] == value and now - cached["ts"] < _CACHE_TTL:
+            result[provider] = cached["result"]
+        else:
+            to_validate[provider] = value
+
+    if to_validate:
+        _fns = {"anthropic": _test_anthropic_key, "openai": _test_openai_key, "google": _test_google_key}
+
+        async def _run(provider: str, value: str):
+            try:
+                r = await asyncio.wait_for(asyncio.to_thread(_fns[provider], value), timeout=6.0)
+            except asyncio.TimeoutError:
+                r = {"present": True, "valid": False, "error": "Connection timed out"}
+            _key_cache[provider] = {"key": value, "result": r, "ts": time.time()}
+            return provider, r
+
+        for provider, r in await asyncio.gather(*[_run(p, v) for p, v in to_validate.items()]):
+            result[provider] = r
+
+    return result
 
 # Domain list for random topic generation. Picked server-side so the LLM
 # can't default to AI / social media regardless of training biases.
@@ -144,31 +221,33 @@ def _total_tokens_from_runs() -> dict:
 
 @router.get("/settings")
 async def get_settings():
-    """Return API key presence, current config, global token totals, and env path."""
-    # Re-read .env on every request so the UI reflects changes without a server restart.
+    """Return API key validity, current config, global token totals, and env path."""
     load_dotenv(dotenv_path=_ENV_PATH, override=True)
     raw_totals = _total_tokens_from_runs()
+
+    raw_keys = {
+        "anthropic": (os.environ.get("ANTHROPIC_API_KEY") or "").strip(),
+        "openai":    (os.environ.get("OPENAI_API_KEY")    or "").strip(),
+        "google":    (os.environ.get("GOOGLE_API_KEY")    or "").strip(),
+    }
+    key_info   = await _validate_all_keys(raw_keys)
+    # key_status stays True only for valid keys — gates model dropdowns everywhere.
+    key_status = {p: info["valid"] for p, info in key_info.items()}
+
     return {
-        # key_status shape matches app.js expectations
-        "key_status": {
-            "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-            "openai":    bool(os.environ.get("OPENAI_API_KEY")),
-            "google":    bool(os.environ.get("GOOGLE_API_KEY")),
-        },
-        # legacy fields kept for backward compat
-        "anthropic_key_present": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        "openai_key_present":    bool(os.environ.get("OPENAI_API_KEY")),
+        "key_info":   key_info,
+        "key_status": key_status,
+        # legacy fields
+        "anthropic_key_present": key_status["anthropic"],
+        "openai_key_present":    key_status["openai"],
         "config": _load_config(),
-        # token_totals shape: {total, input, output}
         "token_totals": {
             "total":  raw_totals["input_tokens"] + raw_totals["output_tokens"],
             "input":  raw_totals["input_tokens"],
             "output": raw_totals["output_tokens"],
         },
-        # absolute path to the .env file (used by app.js open-env link)
         "env_path": str(Path(".env").resolve()),
         "platform": __import__("sys").platform,
-        # providers that recently returned billing-exhaustion errors
         "key_warnings": _load_key_warnings(),
     }
 
@@ -236,6 +315,8 @@ async def update_key(payload: dict):
     # Reload so the running process picks up the change immediately.
     load_dotenv(dotenv_path=_ENV_PATH, override=True)
     os.environ[env_name] = value
+    # Bust the validation cache so the next GET /settings re-tests this key.
+    _key_cache.pop(provider, None)
     # If the key is being set (non-empty), clear any existing quota warning for this provider.
     if value:
         warnings = _load_key_warnings()

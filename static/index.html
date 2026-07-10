@@ -29,8 +29,8 @@
 <!-- API key nudge banner — shown when at least one key is missing; hidden by app.js once all keys are present -->
 <div class="key-banner" id="key-banner" style="display:none">
   <i class="ti ti-alert-triangle" aria-hidden="true"></i>
-  <span>one or more API keys are missing — models without keys can't be used.</span>
-  <a href="#/settings" class="key-banner-link">add keys in settings</a>
+  <span id="key-banner-msg">No working API key found — add at least one to start debates.</span>
+  <a href="#/settings" class="key-banner-link" id="key-banner-link">add a key in settings</a>
   <button class="key-banner-close" aria-label="dismiss" onclick="this.parentElement.style.display='none'">
     <i class="ti ti-x" aria-hidden="true"></i>
   </button>

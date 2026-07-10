@@ -813,7 +813,9 @@ a { color: inherit; text-decoration: none; }
 .key-row:last-of-type { border-bottom: none; }
 .key-name             { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; }
 .key-status-ok        { color: var(--text-success); font-size: 11px; }
-.key-status-missing   { color: var(--text-danger); font-size: 11px; }
+.key-status-missing   { color: var(--text-muted);  font-size: 11px; }
+.key-status-invalid   { color: var(--text-warning); font-size: 11px; }
+.key-status-error     { color: var(--text-muted); font-size: 10px; font-style: italic; }
 .key-used-by {
   font-size: 10px;
   color: var(--text-muted);
