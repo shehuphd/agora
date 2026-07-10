@@ -1,32 +1,29 @@
-protocol:
-  min_challenges: 5
-  min_concessions: 2
-  max_turns: 20
-  max_time_minutes: 15
-  token_budget: 100000
-  repetition_tolerance: 2
-  require_full_resolution: false
-  require_steelman: false
-  max_steelman_attempts: 2
-
-agents:
-  proposition:
-    model: claude-sonnet-4-6
-    temperature: 0.7
-    max_claims: 5
-  opposition:
-    model: gpt-4o
-    temperature: 0.4
-    aggression: 0.8
-  moderator:
-    model: claude-opus-4-8
-    temperature: 0.3
-    auto_generate_title: true
-
 agent_settings:
   history_window: 6
-
+agents:
+  moderator:
+    auto_generate_title: true
+    model: claude-haiku-4-5
+    temperature: 0.3
+  opposition:
+    aggression: 0.8
+    model: claude-opus-4-8
+    temperature: 0.4
+  proposition:
+    max_claims: 5
+    model: claude-sonnet-4-6
+    temperature: 0.7
 output:
   generate_markdown: true
-  store_argument_trace: true
   score_final_output: true
+  store_argument_trace: true
+protocol:
+  max_steelman_attempts: 2
+  max_time_minutes: 15
+  max_turns: 20
+  min_challenges: 5
+  min_concessions: 2
+  repetition_tolerance: 2
+  require_full_resolution: false
+  require_steelman: true
+  token_budget: 40000

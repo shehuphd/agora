@@ -80,7 +80,8 @@ User-requested end: the End button triggers an orderly close — the Moderator r
 | Provider | Models |
 |----------|--------|
 | Anthropic | `claude-sonnet-4-6`, `claude-opus-4-8`, `claude-haiku-4-5` |
-| OpenAI | `gpt-4o`, `gpt-4o-mini` |
+| OpenAI (GPT-5) | `gpt-5.6` (Sol), `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5` |
+| OpenAI (GPT-4 / o-series) | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o3`, `o3-mini`, `o4-mini`, `o1` |
 | Google | `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash` |
 
 Any agent role can be assigned any model from any provider. Model dropdowns are gated by key presence — a model whose provider key is absent is shown as disabled.

@@ -88,14 +88,29 @@ const _MOD_NAMES  = ['Arbiter', 'Logos', 'Themis', 'Referee', 'Impartial', 'Ment
 function _pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 const ALL_MODELS = [
+  // Anthropic
   { value: 'claude-sonnet-4-6', label: 'claude sonnet 4.6', provider: 'anthropic' },
   { value: 'claude-opus-4-8',   label: 'claude opus 4.8',   provider: 'anthropic' },
   { value: 'claude-haiku-4-5',  label: 'claude haiku 4.5',  provider: 'anthropic' },
-  { value: 'gpt-4o',            label: 'gpt-4o',            provider: 'openai' },
-  { value: 'gpt-4o-mini',       label: 'gpt-4o mini',       provider: 'openai' },
-  { value: 'gemini-2.0-flash',  label: 'gemini 2.0 flash',  provider: 'google' },
-  { value: 'gemini-1.5-pro',    label: 'gemini 1.5 pro',    provider: 'google' },
-  { value: 'gemini-1.5-flash',  label: 'gemini 1.5 flash',  provider: 'google' },
+  // OpenAI — GPT-5 family (current)
+  { value: 'gpt-5.6',          label: 'gpt-5.6 (sol)',      provider: 'openai' },
+  { value: 'gpt-5.6-terra',    label: 'gpt-5.6 terra',      provider: 'openai' },
+  { value: 'gpt-5.6-luna',     label: 'gpt-5.6 luna',       provider: 'openai' },
+  { value: 'gpt-5',            label: 'gpt-5',              provider: 'openai' },
+  // OpenAI — GPT-4 family (legacy)
+  { value: 'gpt-4.1',          label: 'gpt-4.1',            provider: 'openai' },
+  { value: 'gpt-4.1-mini',     label: 'gpt-4.1 mini',       provider: 'openai' },
+  { value: 'gpt-4o',           label: 'gpt-4o',             provider: 'openai' },
+  { value: 'gpt-4o-mini',      label: 'gpt-4o mini',        provider: 'openai' },
+  // OpenAI — o-series reasoning
+  { value: 'o3',               label: 'o3',                  provider: 'openai' },
+  { value: 'o3-mini',          label: 'o3 mini',             provider: 'openai' },
+  { value: 'o4-mini',          label: 'o4 mini',             provider: 'openai' },
+  { value: 'o1',               label: 'o1',                  provider: 'openai' },
+  // Google
+  { value: 'gemini-2.0-flash', label: 'gemini 2.0 flash',   provider: 'google' },
+  { value: 'gemini-1.5-pro',   label: 'gemini 1.5 pro',     provider: 'google' },
+  { value: 'gemini-1.5-flash', label: 'gemini 1.5 flash',   provider: 'google' },
 ];
 
 function _providerForModel(model) {
@@ -478,10 +493,9 @@ async function loadSettings() {
     loadNavTokenTotal();
   };
 
-  document.getElementById('btn-save-defaults').onclick = async () => {
-    const btn = document.getElementById('btn-save-defaults');
+  document.getElementById('btn-save-settings').onclick = async () => {
+    const btn = document.getElementById('btn-save-settings');
     btn.disabled = true;
-    const orig = btn.innerHTML;
     btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> saving…';
     const payload = {
       protocol: {
@@ -507,7 +521,14 @@ async function loadSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    btn.innerHTML = '<i class="ti ti-check" aria-hidden="true"></i> saved';
-    setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 1800);
+    window.location.reload();
+  };
+
+  document.getElementById('btn-reset-defaults').onclick = async () => {
+    const btn = document.getElementById('btn-reset-defaults');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> resetting…';
+    await fetch('/settings/reset-defaults', { method: 'POST' });
+    window.location.reload();
   };
 }

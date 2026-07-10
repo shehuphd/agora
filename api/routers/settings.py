@@ -68,6 +68,31 @@ _ENV_PATH = Path(".env").resolve()
 router = APIRouter()
 
 CONFIG_PATH    = Path(__file__).parent.parent.parent / "config" / "defaults.yaml"
+
+_FACTORY_DEFAULTS = {
+    "agent_settings": {"history_window": 6},
+    "agents": {
+        "proposition": {"model": "claude-sonnet-4-6", "temperature": 0.7, "max_claims": 5},
+        "opposition":  {"model": "claude-opus-4-8",   "temperature": 0.4, "aggression": 0.8},
+        "moderator":   {"model": "claude-haiku-4-5",  "temperature": 0.3, "auto_generate_title": True},
+    },
+    "output": {
+        "generate_markdown": True,
+        "score_final_output": True,
+        "store_argument_trace": True,
+    },
+    "protocol": {
+        "max_steelman_attempts": 2,
+        "max_time_minutes": 15,
+        "max_turns": 20,
+        "min_challenges": 5,
+        "min_concessions": 2,
+        "repetition_tolerance": 2,
+        "require_full_resolution": False,
+        "require_steelman": False,
+        "token_budget": 40000,
+    },
+}
 RUNS_DIR       = Path(__file__).parent.parent.parent / "runs"
 _WARNINGS_PATH = Path(__file__).parent.parent.parent / "config" / "key_warnings.json"
 
@@ -161,6 +186,16 @@ async def update_settings(updates: dict):
         from agents.base import set_history_window
         set_history_window(hw)
     return {"status": "ok", "config": config}
+
+
+@router.post("/settings/reset-defaults")
+async def reset_defaults():
+    """Overwrite defaults.yaml with factory values."""
+    with open(CONFIG_PATH, "w") as f:
+        yaml.dump(_FACTORY_DEFAULTS, f, default_flow_style=False)
+    from agents.base import set_history_window
+    set_history_window(_FACTORY_DEFAULTS["agent_settings"]["history_window"])
+    return {"status": "ok", "config": _FACTORY_DEFAULTS}
 
 
 @router.post("/settings/reset-tokens")
