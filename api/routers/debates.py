@@ -71,6 +71,13 @@ async def _run_debate_wrapper(
         await queue.put(None)
 
 
+@router.get("/debates/{session_id}/alive")
+async def debate_alive(session_id: str):
+    """Return whether this session still has an active runner in memory.
+    Used by the frontend to detect server restarts vs transient network drops."""
+    return {"alive": session_id in _session_queues}
+
+
 @router.post("/debates/{session_id}/pause")
 async def pause_debate(session_id: str):
     ev = _pause_events.get(session_id)

@@ -218,11 +218,25 @@ function _openSSE(sessionId) {
   activeSSE.onerror = async () => {
     removeThinkingBubble();
     _reconnectCount++;
-    // Give the browser's built-in SSE reconnect a chance to fire first.
-    // If it doesn't recover within 4 s, check whether the debate is actually closed.
-    await new Promise(r => setTimeout(r, 4000));
+    // Short wait for the browser's built-in SSE reconnect to fire.
+    await new Promise(r => setTimeout(r, 2000));
     if (!activeSSE) return; // already cleaned up
+
     try {
+      // Check aliveness first — fast, tells us if the server restarted.
+      const aliveRes = await fetch(`/debates/${sessionId}/alive`);
+      if (aliveRes.ok) {
+        const { alive } = await aliveRes.json();
+        if (!alive) {
+          // Session is gone from memory — server restarted mid-debate.
+          if (activeSSE) { activeSSE.close(); activeSSE = null; }
+          appendSystemBubble('ti-server-off',
+            'The server restarted while this debate was running. The transcript so far is saved — use "Rerun with same settings" to start a new run.');
+          markDebateClosed();
+          return;
+        }
+      }
+      // Runner still alive — check if it closed cleanly while we were disconnected.
       const check = await fetch(`/debates/${sessionId}`);
       if (check.ok) {
         const d = await check.json();
@@ -233,12 +247,13 @@ function _openSSE(sessionId) {
         }
       }
     } catch (_) {}
-    // Still no server — show a connectivity message but keep SSE open for auto-reconnect.
+
+    // Runner alive but SSE dropped — transient network issue, keep retrying.
     if (_reconnectCount <= 3) {
       appendSystemBubble('ti-wifi-off', `Connection interrupted — reconnecting… (attempt ${_reconnectCount})`);
     } else {
-      appendSystemBubble('ti-wifi-off', 'Connection lost. The debate runner may have timed out. Refresh to check the latest state.');
       if (activeSSE) { activeSSE.close(); activeSSE = null; }
+      appendSystemBubble('ti-wifi-off', 'Connection lost after several attempts. Refresh to check the latest state.');
       markDebateClosed();
     }
   };
