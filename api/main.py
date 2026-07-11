@@ -1,9 +1,11 @@
 """FastAPI application entry point for Agora."""
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,7 +30,19 @@ async def lifespan(app: FastAPI):
     yield
 
 
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    """Add Cache-Control: no-store to JS/CSS/HTML responses so edits are reflected immediately."""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path.split("?")[0]
+        if path.endswith((".js", ".css", ".html")) or path == "/":
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+
 app = FastAPI(title="Agora Debate System", lifespan=lifespan)
+
+app.add_middleware(NoCacheStaticMiddleware)
 
 # Allow all origins for local development
 app.add_middleware(

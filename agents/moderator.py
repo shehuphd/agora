@@ -209,7 +209,7 @@ Your role is moderator. Emit exactly one JSON object (STATUS or CLOSE). No other
 
         return Act(
             act_id=str(uuid.uuid4()),
-            session_id=state.session_id,
+            run_id=state.run_id,
             turn=state.turn,
             agent=self.nickname,
             agent_role=self.role,

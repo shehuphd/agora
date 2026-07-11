@@ -15,8 +15,8 @@ from core.export import write_debate_files
 # ---------------------------------------------------------------------------
 
 _DDL = """
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id    TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS runs (
+    run_id        TEXT PRIMARY KEY,
     created_at    TEXT,
     status        TEXT,
     debate_title  TEXT,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS acts (
     act_id         TEXT PRIMARY KEY,
-    session_id     TEXT,
+    run_id         TEXT,
     turn           INTEGER,
     agent          TEXT,
     agent_role     TEXT,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS acts (
 
 CREATE TABLE IF NOT EXISTS claims (
     claim_id          TEXT PRIMARY KEY,
-    session_id        TEXT,
+    run_id            TEXT,
     author            TEXT,
     content           TEXT,
     status            TEXT,
@@ -67,12 +67,15 @@ CREATE TABLE IF NOT EXISTS meta (
 def init_db(conn: sqlite3.Connection) -> None:
     """Create all required tables in the given SQLite connection if they don't exist."""
     conn.executescript(_DDL)
-    # Migrate existing DBs that predate the config column
-    try:
-        conn.execute("ALTER TABLE sessions ADD COLUMN config TEXT")
-        conn.commit()
-    except Exception:
-        pass
+    for col_sql in (
+        "ALTER TABLE runs ADD COLUMN config TEXT",
+        "ALTER TABLE runs ADD COLUMN continued_from TEXT",
+    ):
+        try:
+            conn.execute(col_sql)
+            conn.commit()
+        except Exception:
+            pass
     conn.commit()
 
 
@@ -80,12 +83,12 @@ def write_act_to_db(conn: sqlite3.Connection, act: Act) -> None:
     """Insert a single Act record into the acts table."""
     conn.execute(
         """INSERT OR REPLACE INTO acts
-           (act_id, session_id, turn, agent, agent_role, act_type,
+           (act_id, run_id, turn, agent, agent_role, act_type,
             claim_id, target_act_id, content, reason,
             input_tokens, output_tokens, model_used, timestamp)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            act.act_id, act.session_id, act.turn, act.agent, act.agent_role,
+            act.act_id, act.run_id, act.turn, act.agent, act.agent_role,
             act.act_type, act.claim_id, act.target_act_id, act.content,
             act.reason, act.input_tokens, act.output_tokens,
             act.model_used, act.timestamp,
@@ -100,10 +103,10 @@ def update_claim_statuses(conn: sqlite3.Connection, state: DialogueState) -> Non
         steelman_attempts = getattr(claim, "steelman_attempts", 0)
         conn.execute(
             """INSERT OR REPLACE INTO claims
-               (claim_id, session_id, author, content, status, last_updated, steelman_attempts)
+               (claim_id, run_id, author, content, status, last_updated, steelman_attempts)
                VALUES (?,?,?,?,?,?,?)""",
             (
-                claim.claim_id, claim.session_id, claim.author,
+                claim.claim_id, claim.run_id, claim.author,
                 claim.content, claim.status, claim.last_updated,
                 steelman_attempts,
             ),
@@ -119,7 +122,7 @@ def write_state_json(state: DialogueState, run_dir: Path) -> None:
     """Serialise full DialogueState to state.json in the run directory."""
     # Convert dataclass to dict, handling nested dataclasses manually
     data = {
-        "session_id": state.session_id,
+        "run_id": state.run_id,
         "turn": state.turn,
         "phase": state.phase,
         "debate_title": state.debate_title,
@@ -188,7 +191,7 @@ def export_markdown(state: DialogueState, run_dir: Path) -> None:
         f"# {state.debate_title}",
         "",
         f"**Topic:** {state.topic}",
-        f"**Session:** `{state.session_id}`",
+        f"**Run:** `{state.run_id}`",
         f"**Started:** {state.created_at}",
         f"**Closed:** {state.closed_at or 'ongoing'}",
         f"**Closure reason:** {state.closure_reason or '—'}",
@@ -223,30 +226,64 @@ def checkpoint(conn: sqlite3.Connection, state: DialogueState, act: Act, run_dir
 # Load state from DB (for API reads)
 # ---------------------------------------------------------------------------
 
-def load_state(conn: sqlite3.Connection, session_id: str) -> DialogueState:
-    """Reconstruct a DialogueState from the SQLite database for a given session_id."""
+def _reconstruct_outstanding_challenges(acts: list) -> list:
+    """Replay challenge/resolve logic across the act list to find unresolved challenges."""
+    outstanding: list = []
+    for act in acts:
+        if act.act_type == "CHALLENGE":
+            outstanding.append(act.act_id)
+        elif act.act_type == "REVISE":
+            if act.target_act_id and act.target_act_id in outstanding:
+                outstanding.remove(act.target_act_id)
+        elif act.act_type == "CONCEDE":
+            if act.target_act_id and act.target_act_id in outstanding:
+                outstanding.remove(act.target_act_id)
+            elif outstanding:
+                for ch_id in reversed(list(outstanding)):
+                    ch_act = next(
+                        (a for a in acts if a.act_id == ch_id
+                         and (not act.claim_id or a.claim_id == act.claim_id)),
+                        None,
+                    )
+                    if ch_act:
+                        outstanding.remove(ch_id)
+                        break
+    return outstanding
+
+
+def debate_turn_idx(acts: list) -> int:
+    """Return the turn_idx to resume from when continuing a debate.
+
+    Counts proposition + opposition acts only — this matches the runner's
+    turn_idx counter which alternates between agents[0] and agents[1].
+    """
+    return sum(1 for a in acts if a.agent_role in ("proposition", "opposition"))
+
+
+def load_state(conn: sqlite3.Connection, run_id: str) -> DialogueState:
+    """Reconstruct a DialogueState from the SQLite database for a given run_id."""
     from core.state import TokenUsage, Claim, Act as ActDC
 
-    session_row = conn.execute(
-        "SELECT session_id, created_at, status, debate_title, topic, closure_reason, steelman_mode FROM sessions WHERE session_id=?",
-        (session_id,),
+    run_row = conn.execute(
+        "SELECT run_id, created_at, status, debate_title, topic, closure_reason, steelman_mode, config FROM runs WHERE run_id=?",
+        (run_id,),
     ).fetchone()
-    if not session_row:
-        raise ValueError(f"Session {session_id} not found in database")
+    if not run_row:
+        raise ValueError(f"Run {run_id} not found in database")
 
     act_rows = conn.execute(
-        "SELECT act_id, session_id, turn, agent, agent_role, act_type, claim_id, target_act_id, content, reason, input_tokens, output_tokens, model_used, timestamp FROM acts WHERE session_id=? ORDER BY turn, timestamp",
-        (session_id,),
+        "SELECT act_id, run_id, turn, agent, agent_role, act_type, claim_id, target_act_id, content, reason, input_tokens, output_tokens, model_used, timestamp FROM acts WHERE run_id=? ORDER BY turn, timestamp",
+        (run_id,),
     ).fetchall()
 
     claim_rows = conn.execute(
-        "SELECT claim_id, session_id, author, content, status, last_updated, steelman_attempts FROM claims WHERE session_id=?",
-        (session_id,),
+        "SELECT claim_id, run_id, author, content, status, last_updated, steelman_attempts FROM claims WHERE run_id=?",
+        (run_id,),
     ).fetchall()
 
     acts = [
         ActDC(
-            act_id=r[0], session_id=r[1], turn=r[2], agent=r[3],
+            act_id=r[0], run_id=r[1], turn=r[2], agent=r[3],
             agent_role=r[4], act_type=r[5], claim_id=r[6],
             target_act_id=r[7], content=r[8], reason=r[9],
             input_tokens=r[10], output_tokens=r[11],
@@ -257,7 +294,7 @@ def load_state(conn: sqlite3.Connection, session_id: str) -> DialogueState:
 
     claims = {
         r[0]: Claim(
-            claim_id=r[0], session_id=r[1], author=r[2],
+            claim_id=r[0], run_id=r[1], author=r[2],
             content=r[3], status=r[4], last_updated=r[5],
             steelman_attempts=r[6] if len(r) > 6 else 0,
         )
@@ -275,35 +312,49 @@ def load_state(conn: sqlite3.Connection, session_id: str) -> DialogueState:
             token_usage[role].input_tokens += act.input_tokens
             token_usage[role].output_tokens += act.output_tokens
 
-    # Derive current phase from last non-moderator act type
-    phase = "init"  # before any act, opening state allows ASSERT
+    # Derive current phase from last phase-changing act type (STATUS doesn't change phase)
+    phase = "init"
     for act in reversed(acts):
         if act.act_type == "CLOSE":
             phase = "closed"
             break
-        if act.act_type not in ("STATUS",):
+        if act.act_type not in ("STATUS", "ARGUMENT_MAP"):
             from core.state import PHASE_MAP
             phase = PHASE_MAP.get(act.act_type, "init")
             break
 
-    # steelman_mode stored as INTEGER 0/1 in DB
-    steelman_mode = bool(session_row[6]) if len(session_row) > 6 and session_row[6] is not None else False
+    # steelman_mode: DB column first, then fall back to stored config JSON
+    # (older runs were inserted without the steelman_mode column value)
+    steelman_mode = bool(run_row[6]) if len(run_row) > 6 and run_row[6] else False
+    if not steelman_mode and len(run_row) > 7 and run_row[7]:
+        try:
+            steelman_mode = bool(json.loads(run_row[7]).get("steelman_mode", False))
+        except Exception:
+            pass
+
+    # Derive next_agent from last proposition/opposition act
+    debate_acts = [a for a in acts if a.agent_role in ("proposition", "opposition")]
+    if debate_acts:
+        last_role = debate_acts[-1].agent_role
+        next_agent = "opposition" if last_role == "proposition" else "proposition"
+    else:
+        next_agent = "proposition"
 
     return DialogueState(
-        session_id=session_row[0],
+        run_id=run_row[0],
         turn=len(acts),
         phase=phase,
         claims=claims,
         acts=acts,
-        outstanding_challenges=[],
-        next_agent="proposition",
+        outstanding_challenges=_reconstruct_outstanding_challenges(acts),
+        next_agent=next_agent,
         legal_acts=[],
         token_usage=token_usage,
-        debate_title=session_row[3],
-        topic=session_row[4],
+        debate_title=run_row[3],
+        topic=run_row[4],
         config={},
-        created_at=session_row[1],
+        created_at=run_row[1],
         closed_at=None,
-        closure_reason=session_row[5],
+        closure_reason=run_row[5],
         steelman_mode=steelman_mode,
     )

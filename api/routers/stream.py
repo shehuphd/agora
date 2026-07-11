@@ -9,11 +9,11 @@ from api.routers.debates import get_queue
 router = APIRouter()
 
 
-@router.get("/debates/{session_id}/stream")
-async def stream_debate(session_id: str):
+@router.get("/debates/{run_id}/stream")
+async def stream_debate(run_id: str):
     """Stream debate acts as Server-Sent Events until the debate closes."""
     try:
-        queue = get_queue(session_id)
+        queue = get_queue(run_id)
     except HTTPException:
         raise
 

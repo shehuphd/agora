@@ -1,7 +1,7 @@
 // app.js — SPA entry point: routing, nav, new/confirm/settings screens.
 // Hash-based routing. ES modules — no bundler required.
 
-import { loadHistory }  from './history.js';
+import { loadHistory, setHistoryPageSize }  from './history.js?v=3';
 import { loadDebate }   from './debate.js';
 import { esc, formatTokens } from './render.js';
 
@@ -22,9 +22,9 @@ function route() {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('on'));
 
   if (hash.startsWith('#/debate/')) {
-    const sessionId = hash.replace('#/debate/', '');
+    const runId = hash.replace('#/debate/', '');
     document.getElementById('screen-debate').classList.add('on');
-    loadDebate(sessionId);
+    loadDebate(runId);
     return;
   }
 
@@ -355,7 +355,7 @@ function loadConfirm() {
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       sessionStorage.removeItem('pendingDebate');
-      window.location.hash = `#/debate/${data.session_id}`;
+      window.location.hash = `#/debate/${data.run_id}`;
     } catch (e) {
       btn.disabled = false;
       btn.innerHTML = '<i class="ti ti-player-play"></i> retry';
@@ -536,6 +536,13 @@ async function loadSettings() {
       }
     }
 
+    const ps = data.config?.ui?.history_page_size;
+    if (ps != null) {
+      const psEl = document.getElementById('s-history-page-size');
+      if (psEl) psEl.value = String(ps);
+      setHistoryPageSize(ps);
+    }
+
   } catch (e) { console.error('settings load failed', e); }
 
   document.getElementById('btn-reset-tokens').onclick = async () => {
@@ -560,6 +567,9 @@ async function loadSettings() {
       },
       agent_settings: {
         history_window: parseInt(document.getElementById('s-history-window').value),
+      },
+      ui: {
+        history_page_size: parseInt(document.getElementById('s-history-page-size')?.value || '50'),
       },
       agents: {
         proposition: { model: document.getElementById('s-prop-model')?.value },

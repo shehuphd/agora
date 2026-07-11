@@ -91,6 +91,40 @@ class DebateRunConfig:
             }
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "DebateRunConfig":
+        """Reconstruct from a serialised config dict (the sessions.config column value)."""
+        proto = d.get("protocol", d)  # supports both flat and nested protocol keys
+        return cls(
+            topic=d["topic"],
+            debate_title=d.get("debate_title", f"Debate: {d['topic'][:60]}"),
+            proposition=AgentRunConfig(
+                model=d.get("proposition_model", "claude-sonnet-4-6"),
+                temperature=d.get("temperature_proposition", 0.7),
+                nickname=d.get("proposition_nickname", "Thesis"),
+            ),
+            opposition=AgentRunConfig(
+                model=d.get("opposition_model", "gpt-4o"),
+                temperature=d.get("temperature_opposition", 0.4),
+                nickname=d.get("opposition_nickname", "Antithesis"),
+                aggression=d.get("aggression", 0.8),
+            ),
+            moderator=AgentRunConfig(
+                model=d.get("moderator_model", "claude-opus-4-8"),
+                temperature=d.get("temperature_moderator", 0.3),
+                nickname="Moderator",
+            ),
+            protocol=ProtocolRunConfig(
+                max_turns=proto.get("max_turns", 8),
+                max_time_minutes=proto.get("max_time_minutes", 15),
+                token_budget=proto.get("token_budget", 100_000),
+                min_challenges=proto.get("min_challenges", 2),
+                min_concessions=proto.get("min_concessions", 1),
+                repetition_tolerance=proto.get("repetition_tolerance", 1),
+            ),
+            steelman_mode=d.get("steelman_mode", False),
+        )
+
     def to_json(self) -> str:
         """Serialise for storage in the sessions.config column."""
         return json.dumps({

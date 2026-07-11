@@ -41,13 +41,16 @@ _AGENT_TIMEOUT = 90.0  # seconds
 
 
 async def run_debate(
-    session_id: str,
+    run_id: str,
     config: DebateRunConfig,
     run_dir: Path,
     event_queue: asyncio.Queue,
     pause_event: asyncio.Event | None = None,
     overrides: dict | None = None,
     force_close_event: asyncio.Event | None = None,
+    initial_state: "DialogueState | None" = None,
+    turn_idx_start: int = 0,
+    continued_from: str | None = None,
 ):
     """Entry point: initialise DB + state, build agents, run orchestrator."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -57,35 +60,67 @@ async def run_debate(
     init_db(conn)
 
     now = datetime.utcnow().isoformat()
-    state = DialogueState(
-        session_id=session_id,
-        turn=0,
-        phase="init",
-        claims={},
-        acts=[],
-        outstanding_challenges=[],
-        next_agent="proposition",
-        legal_acts=["ASSERT"],
-        token_usage={
-            "proposition": TokenUsage(),
-            "opposition":  TokenUsage(),
-            "moderator":   TokenUsage(),
-            "synthesiser": TokenUsage(),
-        },
-        debate_title=config.debate_title,
-        topic=config.topic,
-        config={},
-        created_at=now,
-        closed_at=None,
-        closure_reason=None,
-        steelman_mode=config.steelman_mode,
-    )
 
-    conn.execute(
-        "INSERT INTO sessions (session_id, created_at, status, debate_title, topic, closure_reason, config) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (session_id, now, "running", config.debate_title, config.topic, None, config.to_json()),
-    )
+    if initial_state is not None:
+        # Continuation: reuse historical state with a fresh run identity.
+        state = initial_state
+        state.run_id      = run_id
+        state.created_at  = now       # reset clock so max_time_minutes starts fresh
+        state.closure_reason = None
+        state.closed_at      = None
+        # Keep historical token_usage — termination check fires at the original
+        # budget ceiling, and the UI can show "X / original" by reading the offset.
+        # Rebind claim run_ids so checkpoint() writes them under the new run.
+        for claim in state.claims.values():
+            claim.run_id = run_id
+        conn.execute(
+            "INSERT INTO runs "
+            "(run_id, created_at, status, debate_title, topic, closure_reason, config, continued_from, steelman_mode) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (run_id, now, "running", state.debate_title, state.topic,
+             None, config.to_json(), continued_from, int(state.steelman_mode)),
+        )
+        # Persist historical token totals so the frontend can display "spent / original".
+        import json as _json_rt
+        _offset = {
+            "total":       sum(u.input_tokens + u.output_tokens for u in state.token_usage.values()),
+            "proposition": state.token_usage["proposition"].input_tokens + state.token_usage["proposition"].output_tokens,
+            "opposition":  state.token_usage["opposition"].input_tokens  + state.token_usage["opposition"].output_tokens,
+            "moderator":   state.token_usage["moderator"].input_tokens   + state.token_usage["moderator"].output_tokens,
+        }
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     ("token_offset", _json_rt.dumps(_offset)))
+    else:
+        state = DialogueState(
+            run_id=run_id,
+            turn=0,
+            phase="init",
+            claims={},
+            acts=[],
+            outstanding_challenges=[],
+            next_agent="proposition",
+            legal_acts=["ASSERT"],
+            token_usage={
+                "proposition": TokenUsage(),
+                "opposition":  TokenUsage(),
+                "moderator":   TokenUsage(),
+                "synthesiser": TokenUsage(),
+            },
+            debate_title=config.debate_title,
+            topic=config.topic,
+            config={},
+            created_at=now,
+            closed_at=None,
+            closure_reason=None,
+            steelman_mode=config.steelman_mode,
+        )
+        conn.execute(
+            "INSERT INTO runs "
+            "(run_id, created_at, status, debate_title, topic, closure_reason, config, steelman_mode) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (run_id, now, "running", config.debate_title, config.topic,
+             None, config.to_json(), int(config.steelman_mode)),
+        )
     conn.commit()
 
     proposition = PropositionAgent(
@@ -130,6 +165,8 @@ async def run_debate(
         pause_event=pause_event,
         overrides=overrides or {},
         force_close_event=force_close_event,
+        turn_idx_start=turn_idx_start,
+        continued_from=continued_from,
     )
     await orchestrator.run()
 
@@ -156,6 +193,8 @@ class TurnOrchestrator:
         pause_event: asyncio.Event | None = None,
         overrides: dict | None = None,
         force_close_event: asyncio.Event | None = None,
+        turn_idx_start: int = 0,
+        continued_from: str | None = None,
     ):
         self.state = state
         self.agents = agents
@@ -171,6 +210,8 @@ class TurnOrchestrator:
         self._overrides = overrides if overrides is not None else {}
         self._force_close_event = force_close_event or asyncio.Event()
         self._loop = asyncio.get_running_loop()
+        self._turn_idx_start = turn_idx_start
+        self._continued_from = continued_from
 
     def _effective_token_budget(self) -> int:
         return self._overrides.get("token_budget", self.config.protocol.token_budget)
@@ -183,18 +224,22 @@ class TurnOrchestrator:
 
     async def run(self) -> None:
         max_turns = self.config.protocol.max_turns
-        turn_idx = 0
+        turn_idx = self._turn_idx_start
 
-        # Short pause so the SSE connection is established before the first event.
         await asyncio.sleep(0.3)
-        await self.event_queue.put({
+        intro: dict = {
             "type": "intro",
             "topic": self.state.topic,
             "proposition_nickname": self.agents[0].nickname,
             "opposition_nickname":  self.agents[1].nickname,
             "moderator_nickname":   self.moderator.nickname,
             "steelman_mode":        self.state.steelman_mode,
-        })
+        }
+        if self._continued_from:
+            intro["is_continuation"] = True
+            intro["continued_from"]  = self._continued_from
+            intro["turn_start"]      = self.state.turn
+        await self.event_queue.put(intro)
 
         try:
             while self.state.turn < max_turns * 2 + 4:  # safety ceiling
@@ -215,6 +260,7 @@ class TurnOrchestrator:
                     break
                 except QuotaExhaustedError as e:
                     _write_quota_warning(e.provider)
+                    self.state.closure_reason = f"quota_exhausted_{e.provider}"
                     await self.event_queue.put({"type": "error", "message": _friendly_quota_error(e.provider)})
                     break
                 except Exception as e:
@@ -264,7 +310,7 @@ class TurnOrchestrator:
                     })
                     should_close = True
                     if not self.state.closure_reason:
-                        self.state.closure_reason = "moderator_error"
+                        self.state.closure_reason = f"quota_exhausted_{e.provider}"
                 except Exception as e:
                     print(f"[runner] MODERATOR ERROR: {e}\n{traceback.format_exc()}", flush=True)
                     await self.event_queue.put({
@@ -301,8 +347,8 @@ class TurnOrchestrator:
             status = "closed" if self.state.closure_reason else "error"
             try:
                 self.conn.execute(
-                    "UPDATE sessions SET status=?, closure_reason=? WHERE session_id=?",
-                    (status, self.state.closure_reason, self.state.session_id),
+                    "UPDATE runs SET status=?, closure_reason=? WHERE run_id=?",
+                    (status, self.state.closure_reason, self.state.run_id),
                 )
                 self.conn.commit()
                 self.conn.close()
@@ -326,7 +372,7 @@ class TurnOrchestrator:
 def _act_to_dict(act) -> dict:
     return {
         "act_id":       act.act_id,
-        "session_id":   act.session_id,
+        "run_id":       act.run_id,
         "turn":         act.turn,
         "agent":        act.agent,
         "agent_role":   act.agent_role,

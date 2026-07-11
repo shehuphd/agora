@@ -120,21 +120,37 @@ export function appendIntroBubble(msg) {
   const feed = document.getElementById('act-feed');
   const div = document.createElement('div');
   div.className = 'act-bubble act-intro';
-  const steelmanLine = msg.steelman_mode
-    ? `<br><span class="act-label">· Rapoport mode active — Opposition must steelman each claim before challenging.</span>`
-    : '';
-  div.innerHTML = `
-    <div class="act-head">
-      <span class="agent-pill pill-mod">${esc(msg.moderator_nickname || 'Moderator')}</span>
-      <span class="act-type">INTRO</span>
-    </div>
-    <div class="act-text">
-      The thesis before us: <strong>${esc(msg.topic)}</strong>.<br>
-      Arguing in favour: <strong>${esc(msg.proposition_nickname)}</strong>.
-      Arguing against: <strong>${esc(msg.opposition_nickname)}</strong>.
-      Let's begin.${steelmanLine}
-    </div>
-  `;
+
+  if (msg.is_continuation) {
+    const shortId = esc((msg.continued_from || '').slice(0, 8));
+    div.innerHTML = `
+      <div class="act-head">
+        <span class="agent-pill pill-mod">${esc(msg.moderator_nickname || 'Moderator')}</span>
+        <span class="act-type">RESUMING</span>
+      </div>
+      <div class="act-text">
+        Continuing from turn ${esc(String(msg.turn_start ?? '?'))}.<br>
+        The thesis: <strong>${esc(msg.topic)}</strong>.
+        <br><small style="color:var(--text-muted)">Continued from run ${shortId}&hellip;</small>
+      </div>
+    `;
+  } else {
+    const steelmanLine = msg.steelman_mode
+      ? `<br><span class="act-label">· Rapoport mode active — Opposition must steelman each claim before challenging.</span>`
+      : '';
+    div.innerHTML = `
+      <div class="act-head">
+        <span class="agent-pill pill-mod">${esc(msg.moderator_nickname || 'Moderator')}</span>
+        <span class="act-type">INTRO</span>
+      </div>
+      <div class="act-text">
+        The thesis before us: <strong>${esc(msg.topic)}</strong>.<br>
+        Arguing in favour: <strong>${esc(msg.proposition_nickname)}</strong>.
+        Arguing against: <strong>${esc(msg.opposition_nickname)}</strong>.
+        Let's begin.${steelmanLine}
+      </div>
+    `;
+  }
   feed.appendChild(div);
   div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }

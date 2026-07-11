@@ -60,7 +60,7 @@ class TokenUsage:
 class Claim:
     """A single asserted proposition tracked through its lifecycle."""
     claim_id: str
-    session_id: str
+    run_id: str
     author: str           # agent role: 'proposition' | 'opposition'
     content: str
     status: str           # 'open' | 'challenged' | 'revised' | 'conceded' | 'survived' | 'contested'
@@ -78,7 +78,7 @@ class Act:
         STEELMAN, ACCEPT_STEELMAN, REJECT_STEELMAN, MODERATOR_INTERVENTION
     """
     act_id: str
-    session_id: str
+    run_id: str
     turn: int
     agent: str            # nickname
     agent_role: str       # 'proposition' | 'opposition' | 'moderator' | 'synthesiser'
@@ -95,8 +95,8 @@ class Act:
 
 @dataclass
 class DialogueState:
-    """Complete mutable state of one debate session."""
-    session_id: str
+    """Complete mutable state of one debate run."""
+    run_id: str
     turn: int
     phase: str                           # current grammatical phase
     claims: dict                         # claim_id -> Claim
@@ -148,7 +148,7 @@ def apply_act(state: DialogueState, act: Act) -> None:
         act.claim_id = claim_id
         state.claims[claim_id] = Claim(
             claim_id=claim_id,
-            session_id=state.session_id,
+            run_id=state.run_id,
             author=act.agent_role,
             content=act.content,
             status="open",

@@ -27,11 +27,11 @@ def _conn() -> sqlite3.Connection:
     return sqlite3.connect(":memory:")
 
 
-def _make_act(session_id: str = "sess-001") -> Act:
+def _make_act(run_id: str = "sess-001") -> Act:
     """Construct a minimal Act fixture."""
     return Act(
         act_id="act-001",
-        session_id=session_id,
+        run_id=run_id,
         turn=1,
         agent="Thesis",
         agent_role="proposition",
@@ -47,20 +47,20 @@ def _make_act(session_id: str = "sess-001") -> Act:
     )
 
 
-def _make_state(session_id: str = "sess-001") -> DialogueState:
+def _make_state(run_id: str = "sess-001") -> DialogueState:
     """Construct a minimal DialogueState fixture with one claim and one act."""
     now = datetime.utcnow().isoformat()
-    act = _make_act(session_id)
+    act = _make_act(run_id)
     claim = Claim(
         claim_id="claim-001",
-        session_id=session_id,
+        run_id=run_id,
         author="proposition",
         content="AI will fundamentally transform the global economy.",
         status="open",
         last_updated=now,
     )
     return DialogueState(
-        session_id=session_id,
+        run_id=run_id,
         turn=1,
         phase="assert",
         claims={"claim-001": claim},
@@ -88,7 +88,7 @@ def _make_state(session_id: str = "sess-001") -> DialogueState:
 # ---------------------------------------------------------------------------
 
 def test_init_db_creates_all_tables():
-    """init_db must create sessions, acts, claims, and meta tables."""
+    """init_db must create runs, acts, claims, and meta tables."""
     conn = _conn()
     init_db(conn)
     tables = {
@@ -97,7 +97,7 @@ def test_init_db_creates_all_tables():
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert "sessions" in tables
+    assert "runs" in tables
     assert "acts" in tables
     assert "claims" in tables
     assert "meta" in tables
@@ -188,7 +188,7 @@ def test_claim_status_updates_on_second_call():
 # ---------------------------------------------------------------------------
 
 def test_write_state_json_creates_file():
-    """write_state_json must create state.json with correct session_id."""
+    """write_state_json must create state.json with correct run_id (formerly session_id)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         run_dir = Path(tmpdir)
         state = _make_state()
@@ -197,7 +197,7 @@ def test_write_state_json_creates_file():
         path = run_dir / "state.json"
         assert path.exists()
         data = json.loads(path.read_text())
-        assert data["session_id"] == "sess-001"
+        assert data["run_id"] == "sess-001"
         assert data["topic"] == "AI economics"
 
 

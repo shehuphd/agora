@@ -50,7 +50,7 @@ class DebateConfig(BaseModel):
 class ActResponse(BaseModel):
     """Serialised Act for API responses."""
     act_id: str
-    session_id: str
+    run_id: str
     turn: int
     agent: str
     agent_role: str
@@ -66,7 +66,7 @@ class ActResponse(BaseModel):
 
 class DebateResponse(BaseModel):
     """Full debate state returned by GET /debates/{id}."""
-    session_id: str
+    run_id: str
     debate_title: str
     topic: str
     status: str

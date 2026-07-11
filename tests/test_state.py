@@ -12,7 +12,7 @@ from core.state import (
 def _state(**kwargs) -> DialogueState:
     now = datetime.utcnow().isoformat()
     defaults = dict(
-        session_id="test-session",
+        run_id="test-session",
         turn=0,
         phase="init",
         claims={},
@@ -42,7 +42,7 @@ def _act(act_type: str, claim_id: str = None, target_act_id: str = None,
          agent_role: str = "proposition", content: str = "test content") -> Act:
     return Act(
         act_id=str(uuid.uuid4()),
-        session_id="test-session",
+        run_id="test-session",
         turn=0,
         agent="Thesis",
         agent_role=agent_role,

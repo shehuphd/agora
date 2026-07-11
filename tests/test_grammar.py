@@ -7,7 +7,7 @@ from core.grammar import validate_act
 def _make_state(phase: str, steelman_mode: bool = False) -> DialogueState:
     """Build a minimal DialogueState for grammar testing without LLM calls."""
     return DialogueState(
-        session_id="test",
+        run_id="test",
         turn=1,
         phase=phase,
         claims={},

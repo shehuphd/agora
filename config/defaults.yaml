@@ -1,5 +1,7 @@
 agent_settings:
   history_window: 6
+ui:
+  history_page_size: 50
 agents:
   moderator:
     auto_generate_title: true
@@ -25,5 +27,5 @@ protocol:
   min_concessions: 2
   repetition_tolerance: 2
   require_full_resolution: false
-  require_steelman: true
+  require_steelman: false
   token_budget: 40000

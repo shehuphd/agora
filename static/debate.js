@@ -11,21 +11,66 @@ import {
 let activeSSE      = null;
 let debateTok      = { total: 0, proposition: 0, opposition: 0, moderator: 0 };
 let debateCfg      = {};
-let _sessionId     = null;
+let _runId     = null;
 let _isPaused      = false;
 let _overrideCount = 0;
 let _effectiveBudget = 0;
 
-export async function loadDebate(sessionId) {
+// Closure reasons that indicate a natural/intentional end — not resumable.
+const _NON_RESUMABLE = [
+  "max_turns", "max_time_minutes", "token_budget",
+  "user_requested_end", "quota_exhausted",
+  "propose met with concede", "repetition detected", "challenge_rate_floor",
+];
+
+function _isResumable(status, closureReason) {
+  if (status === 'running' || status === 'error') return true;
+  if (!closureReason) return true;
+  const cr = closureReason.toLowerCase();
+  return !_NON_RESUMABLE.some(kw => cr.includes(kw));
+}
+
+function _showContinueButton(runId) {
+  const btn = document.getElementById('btn-continue');
+  if (!btn) return;
+
+  btn.style.display = 'inline-flex';
+  btn.disabled      = false;
+  btn.innerHTML = '<i class="ti ti-player-play" aria-hidden="true"></i> continue';
+
+  btn.onclick = async () => {
+    btn.disabled  = true;
+    btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> continuing…';
+    try {
+      const res = await fetch(`/debates/${runId}/continue`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        btn.disabled  = false;
+        btn.innerHTML = '<i class="ti ti-player-play" aria-hidden="true"></i> continue';
+        appendSystemBubble('ti-alert-circle', err.detail || 'Could not start the continuation.');
+        return;
+      }
+      const { run_id: newId } = await res.json();
+      window.location.hash = `#/debate/${newId}`;
+    } catch (_) {
+      btn.disabled  = false;
+      btn.innerHTML = '<i class="ti ti-player-play" aria-hidden="true"></i> continue';
+      appendSystemBubble('ti-wifi-off', 'Network error — could not start continuation.');
+    }
+  };
+}
+
+export async function loadDebate(runId) {
   debateTok = { total: 0, proposition: 0, opposition: 0, moderator: 0 };
+  let _tokOffset = { total: 0, proposition: 0, opposition: 0, moderator: 0 };
   debateCfg = {};
-  _sessionId     = sessionId;
+  _runId     = runId;
   _isPaused      = false;
   _overrideCount = 0;
   _effectiveBudget = 0;
   document.getElementById('act-feed').innerHTML = '';
   document.getElementById('dh-title').textContent = 'loading...';
-  document.getElementById('dh-id').textContent    = sessionId;
+  document.getElementById('dh-id').textContent    = runId;
   ['tok-total', 'tok-prop', 'tok-opp', 'tok-mod'].forEach(id => {
     document.getElementById(id).textContent = '0';
   });
@@ -47,32 +92,39 @@ export async function loadDebate(sessionId) {
   const rerunBtn = document.getElementById('btn-rerun');
   if (rerunBtn) { rerunBtn.style.display = 'none'; rerunBtn.onclick = null; }
 
-  _wirePauseButton(sessionId);
-  _wireEndButton(sessionId);
-  _wireOverridePanel(sessionId);
+  const continueBtn = document.getElementById('btn-continue');
+  if (continueBtn) { continueBtn.style.display = 'none'; continueBtn.onclick = null; }
+
+  _wirePauseButton(runId);
+  _wireEndButton(runId);
+  _wireOverridePanel(runId);
 
   const exportJsonBtn = document.getElementById('btn-export-debate-json');
   if (exportJsonBtn) {
     exportJsonBtn.onclick = async () => {
-      const res = await fetch(`/debates/${sessionId}/export?format=json`);
+      const res = await fetch(`/debates/${runId}/export?format=json`);
       triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
     };
   }
   const exportMdBtn = document.getElementById('btn-export-debate-md');
   if (exportMdBtn) {
     exportMdBtn.onclick = async () => {
-      const res = await fetch(`/debates/${sessionId}/export?format=markdown`);
+      const res = await fetch(`/debates/${runId}/export?format=markdown`);
       triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
     };
   }
 
   try {
-    const res = await fetch(`/debates/${sessionId}`);
+    const res = await fetch(`/debates/${runId}`);
     if (res.ok) {
       const data = await res.json();
-      document.getElementById('dh-title').textContent = data.debate_title || data.topic || sessionId;
+      document.getElementById('dh-title').textContent = data.debate_title || data.topic || runId;
       debateCfg = data.config || {};
       _effectiveBudget = debateCfg.token_budget || 100_000;
+      if (data.token_offset) {
+        _tokOffset = { ...data.token_offset };
+        debateTok  = { ...data.token_offset };
+      }
       _renderDebateChips(debateCfg);
       if (debateCfg.max_turns) {
         const tv = document.getElementById('term-turns-val');
@@ -90,14 +142,19 @@ export async function loadDebate(sessionId) {
       if (ocEl) ocEl.textContent = _overrideCount;
       renderTokenStrip(debateTok, _effectiveBudget);
       _wireRerunButton(debateCfg);
-      if (data.status === 'closed') {
+      if (data.status === 'closed' || data.status === 'error') {
         markDebateClosed();
+        if (data.is_continuable) _showContinueButton(runId);
         return;
+      }
+      if (data.status === 'running') {
+        // Stuck running means server restarted — server will confirm continuability.
+        if (data.is_continuable) _showContinueButton(runId);
       }
     }
   } catch (e) { console.warn('debate state load failed', e); }
 
-  _openSSE(sessionId);
+  _openSSE(runId);
 }
 
 function _wireRerunButton(cfg) {
@@ -135,10 +192,10 @@ function _wireRerunButton(cfg) {
   };
 }
 
-function _openSSE(sessionId) {
+function _openSSE(runId) {
   if (activeSSE) { activeSSE.close(); activeSSE = null; }
 
-  activeSSE = new EventSource(`/debates/${sessionId}/stream`);
+  activeSSE = new EventSource(`/debates/${runId}/stream`);
 
   activeSSE.onmessage = (event) => {
     const msg = JSON.parse(event.data);
@@ -224,20 +281,24 @@ function _openSSE(sessionId) {
 
     try {
       // Check aliveness first — fast, tells us if the server restarted.
-      const aliveRes = await fetch(`/debates/${sessionId}/alive`);
+      const aliveRes = await fetch(`/debates/${runId}/alive`);
       if (aliveRes.ok) {
         const { alive } = await aliveRes.json();
         if (!alive) {
           // Session is gone from memory — server restarted mid-debate.
           if (activeSSE) { activeSSE.close(); activeSSE = null; }
           appendSystemBubble('ti-server-off',
-            'The server restarted while this debate was running. The transcript so far is saved — use "Rerun with same settings" to start a new run.');
+            'The server restarted while this debate was running. The transcript so far is saved — continue to pick up where it left off, or rerun for a fresh start.');
           markDebateClosed();
+          // For server restarts, check continuability via the API before showing the button.
+          fetch(`/debates/${runId}`).then(r => r.ok ? r.json() : null).then(d => {
+            if (d?.is_continuable) _showContinueButton(runId);
+          }).catch(() => {});
           return;
         }
       }
       // Runner still alive — check if it closed cleanly while we were disconnected.
-      const check = await fetch(`/debates/${sessionId}`);
+      const check = await fetch(`/debates/${runId}`);
       if (check.ok) {
         const d = await check.json();
         if (d.status === 'closed') {
@@ -284,19 +345,19 @@ function _setPauseButtonState(paused) {
   }
 }
 
-function _wirePauseButton(sessionId) {
+function _wirePauseButton(runId) {
   const btn = document.getElementById('btn-pause');
   if (!btn) return;
   btn.onclick = async () => {
     const action = _isPaused ? 'resume' : 'pause';
     try {
-      await fetch(`/debates/${sessionId}/${action}`, { method: 'POST' });
+      await fetch(`/debates/${runId}/${action}`, { method: 'POST' });
       // State update happens when the runner sends the paused/resumed SSE event.
     } catch (e) { console.error('pause/resume failed', e); }
   };
 }
 
-function _wireEndButton(sessionId) {
+function _wireEndButton(runId) {
   const btn = document.getElementById('btn-end');
   if (!btn) return;
 
@@ -320,7 +381,7 @@ function _wireEndButton(sessionId) {
       btn.disabled = true;
       btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> ending…';
       try {
-        await fetch(`/debates/${sessionId}/end`, { method: 'POST' });
+        await fetch(`/debates/${runId}/end`, { method: 'POST' });
         // The runner will finish the current turn, call the moderator with
         // closure_reason="user_requested_end", run the synthesiser, then close.
         // The SSE stream delivers all of this normally — nothing to do here.
@@ -333,7 +394,7 @@ function _wireEndButton(sessionId) {
   };
 }
 
-function _wireOverridePanel(sessionId) {
+function _wireOverridePanel(runId) {
   const btn       = document.getElementById('btn-override');
   const panel     = document.getElementById('override-panel');
   const cancelBtn = document.getElementById('btn-override-cancel');
@@ -367,7 +428,7 @@ function _wireOverridePanel(sessionId) {
       const newBudget = parseInt(input?.value, 10);
       if (!newBudget || newBudget < 1000) return;
       try {
-        await fetch(`/debates/${sessionId}/override`, {
+        await fetch(`/debates/${runId}/override`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token_budget: newBudget }),

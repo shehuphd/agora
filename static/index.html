@@ -84,6 +84,18 @@
       </thead>
       <tbody id="history-tbody"></tbody>
     </table>
+    <div id="history-pagination" class="pagination-bar" style="display:none">
+      <span id="pagination-info" class="pagination-info"></span>
+      <div class="pagination-controls">
+        <button class="btn-ghost btn-sm" id="btn-page-prev" disabled>
+          <i class="ti ti-chevron-left" aria-hidden="true"></i> prev
+        </button>
+        <span id="pagination-page" class="pagination-page"></span>
+        <button class="btn-ghost btn-sm" id="btn-page-next">
+          next <i class="ti ti-chevron-right" aria-hidden="true"></i>
+        </button>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -339,6 +351,9 @@
         <button class="btn-primary btn-sm" id="btn-rerun" style="display:none">
           <i class="ti ti-refresh" aria-hidden="true"></i> rerun with same settings
         </button>
+        <button class="btn-solid btn-sm" id="btn-continue" style="display:none">
+          <i class="ti ti-player-play" aria-hidden="true"></i> continue
+        </button>
         <button class="btn-solid btn-sm" id="btn-export-debate-json">
           <i class="ti ti-download" aria-hidden="true"></i> JSON
         </button>
@@ -583,6 +598,19 @@
         <p class="field-hint" style="margin-top:3px;margin-bottom:0">How many recent acts each agent sees verbatim. Older acts are compacted to a summary. Lower = cheaper per turn; higher = richer context. Default: 6, max: 10.</p>
       </div>
     </div>
+    <div class="thresh-row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="thresh-right">
+        <select id="s-history-page-size" style="width:100px">
+          <option value="50">50 runs</option>
+          <option value="100">100 runs</option>
+          <option value="250">250 runs</option>
+        </select>
+      </div>
+      <div>
+        <span class="thresh-label">history page size</span>
+        <p class="field-hint" style="margin-top:3px;margin-bottom:0">Runs shown per page in the history list. Default: 50.</p>
+      </div>
+    </div>
     <div class="form-actions" style="margin-top:12px">
       <button class="btn-ghost" id="btn-reset-defaults">
         <i class="ti ti-refresh" aria-hidden="true"></i>
@@ -596,6 +624,6 @@
   </div>
 </main>
 
-<script type="module" src="/app.js"></script>
+<script type="module" src="/app.js?v=3"></script>
 </body>
 </html>

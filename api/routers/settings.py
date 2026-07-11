@@ -148,6 +148,7 @@ CONFIG_PATH    = Path(__file__).parent.parent.parent / "config" / "defaults.yaml
 
 _FACTORY_DEFAULTS = {
     "agent_settings": {"history_window": 6},
+    "ui": {"history_page_size": 50},
     "agents": {
         "proposition": {"model": "claude-sonnet-4-6", "temperature": 0.7, "max_claims": 5},
         "opposition":  {"model": "claude-opus-4-8",   "temperature": 0.4, "aggression": 0.8},

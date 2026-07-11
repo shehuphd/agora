@@ -1,26 +1,35 @@
-// history.js — history screen: table rendering, selection, export.
+// history.js — history screen: table rendering, selection, export, pagination.
 
 import { esc, formatTokens, triggerDownload } from './render.js';
 
-export async function loadHistory() {
+let _pageSize = 50;
+
+export function setHistoryPageSize(n) {
+  _pageSize = (n > 0) ? n : 50;
+}
+
+export async function loadHistory(offset = 0) {
   const tbody     = document.getElementById('history-tbody');
   const empty     = document.getElementById('history-empty');
   const tableWrap = document.getElementById('history-table-wrap');
   const subtitle  = document.getElementById('history-subtitle');
+  const pagBar    = document.getElementById('history-pagination');
 
   tbody.innerHTML = '';
   subtitle.textContent = 'loading...';
+  if (pagBar) pagBar.style.display = 'none';
 
   let sortCol = null;   // 'title' | 'turns' | 'tokens' | 'status' | null
   let sortDir = 'asc';  // 'asc' | 'desc'
   const selected = new Set();
 
   try {
-    const res = await fetch('/debates');
+    const res = await fetch(`/debates?limit=${_pageSize}&offset=${offset}`);
     if (!res.ok) throw new Error(res.statusText);
-    const debates = await res.json();
+    const data = await res.json();
+    const { total, items: debates } = data;
 
-    if (!debates.length) {
+    if (!total) {
       empty.style.display = 'block';
       tableWrap.style.display = 'none';
       subtitle.textContent = 'no runs yet';
@@ -31,7 +40,7 @@ export async function loadHistory() {
     tableWrap.style.display = 'block';
 
     const live = debates.filter(d => d.status === 'running').length;
-    subtitle.textContent = `${debates.length} run${debates.length === 1 ? '' : 's'} · ${live} live`;
+    subtitle.textContent = `${total} run${total === 1 ? '' : 's'} · ${live} live`;
 
     function updateExportBar() {
       const bar   = document.getElementById('export-bar');
@@ -90,7 +99,7 @@ export async function loadHistory() {
         body: JSON.stringify({ ids: [...selected] }),
       });
       selected.clear();
-      await loadHistory();
+      await loadHistory(offset);
     };
 
     // --- Sorting ---
@@ -127,7 +136,6 @@ export async function loadHistory() {
     }
 
     function renderRows() {
-      // Preserve checked state across re-renders.
       tbody.innerHTML = '';
       sortedDebates().forEach(d => {
         const statusCls = d.status === 'running' ? 'pill-live' : d.status === 'paused' ? 'pill-paused' : 'pill-done';
@@ -135,9 +143,9 @@ export async function loadHistory() {
         const row = document.createElement('tr');
         row.innerHTML = `
           <td class="col-check" onclick="event.stopPropagation()">
-            <input type="checkbox" class="row-check" data-id="${esc(d.session_id)}"${selected.has(d.session_id) ? ' checked' : ''}>
+            <input type="checkbox" class="row-check" data-id="${esc(d.run_id)}"${selected.has(d.run_id) ? ' checked' : ''}>
           </td>
-          <td class="cell-id">${esc(d.session_id)}</td>
+          <td class="cell-id">${esc(d.run_id)}</td>
           <td class="cell-title">${esc(d.debate_title || d.topic || '—')}</td>
           <td class="cell-meta">${esc(d.proposition_nickname || 'P')} vs ${esc(d.opposition_nickname || 'O')}</td>
           <td class="cell-meta">${esc(d.turn || 0)}</td>
@@ -145,27 +153,27 @@ export async function loadHistory() {
           <td>${modeTag}</td>
           <td><span class="pill ${statusCls}">${esc(d.status)}</span></td>
           <td class="col-check" onclick="event.stopPropagation()">
-            <button class="btn-ghost btn-sm row-export-btn" data-id="${esc(d.session_id)}" title="export JSON">
+            <button class="btn-ghost btn-sm row-export-btn" data-id="${esc(d.run_id)}" title="export JSON">
               <i class="ti ti-download" aria-hidden="true"></i>
             </button>
-            <button class="btn-ghost btn-sm row-export-btn-md" data-id="${esc(d.session_id)}" title="export MD">
+            <button class="btn-ghost btn-sm row-export-btn-md" data-id="${esc(d.run_id)}" title="export MD">
               <i class="ti ti-markdown" aria-hidden="true"></i>
             </button>
           </td>
         `;
         row.querySelector('.row-check').onchange = (e) => {
-          e.target.checked ? selected.add(d.session_id) : selected.delete(d.session_id);
+          e.target.checked ? selected.add(d.run_id) : selected.delete(d.run_id);
           updateExportBar();
         };
         row.querySelector('.row-export-btn').onclick = async () => {
-          const res = await fetch(`/debates/${d.session_id}/export?format=json`);
+          const res = await fetch(`/debates/${d.run_id}/export?format=json`);
           triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
         };
         row.querySelector('.row-export-btn-md').onclick = async () => {
-          const res = await fetch(`/debates/${d.session_id}/export?format=markdown`);
+          const res = await fetch(`/debates/${d.run_id}/export?format=markdown`);
           triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
         };
-        row.addEventListener('click', () => { window.location.hash = `#/debate/${d.session_id}`; });
+        row.addEventListener('click', () => { window.location.hash = `#/debate/${d.run_id}`; });
         tbody.appendChild(row);
       });
     }
@@ -184,6 +192,32 @@ export async function loadHistory() {
     });
 
     renderRows();
+
+    // --- Pagination controls ---
+    if (pagBar) {
+      const totalPages  = Math.ceil(total / _pageSize);
+      const currentPage = Math.floor(offset / _pageSize) + 1;
+      const from = offset + 1;
+      const to   = Math.min(offset + debates.length, total);
+
+      pagBar.style.display = 'flex';
+      const info  = document.getElementById('pagination-info');
+      const label = document.getElementById('pagination-page');
+      const prev  = document.getElementById('btn-page-prev');
+      const next  = document.getElementById('btn-page-next');
+
+      if (info)  info.textContent  = `showing ${from}–${to} of ${total}`;
+      if (label) label.textContent = `page ${currentPage} of ${totalPages}`;
+
+      if (prev) {
+        prev.disabled = offset === 0;
+        prev.onclick  = () => loadHistory(Math.max(0, offset - _pageSize));
+      }
+      if (next) {
+        next.disabled = offset + _pageSize >= total;
+        next.onclick  = () => loadHistory(offset + _pageSize);
+      }
+    }
 
   } catch (e) {
     subtitle.textContent = 'error loading history';

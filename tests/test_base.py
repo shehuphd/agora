@@ -24,7 +24,7 @@ class _FakeAgent(BaseAgent):
 def _state(acts=None) -> DialogueState:
     now = datetime.utcnow().isoformat()
     return DialogueState(
-        session_id="s1", turn=0, phase="init",
+        run_id="s1", turn=0, phase="init",
         claims={}, acts=acts or [],
         outstanding_challenges=[], next_agent="proposition",
         legal_acts=["ASSERT"],
@@ -37,7 +37,7 @@ def _state(acts=None) -> DialogueState:
 
 def _act(turn=0, act_type="ASSERT", content="c", agent_role="proposition") -> Act:
     return Act(
-        act_id=str(uuid.uuid4()), session_id="s1", turn=turn,
+        act_id=str(uuid.uuid4()), run_id="s1", turn=turn,
         agent="Thesis", agent_role=agent_role, act_type=act_type,
         claim_id=None, target_act_id=None, content=content, reason="r",
         input_tokens=1, output_tokens=1, model_used="m",

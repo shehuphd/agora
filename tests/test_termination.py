@@ -21,7 +21,7 @@ def _base_config() -> dict:
 def _make_state(**overrides) -> DialogueState:
     """Build a mid-debate DialogueState with sensible defaults, overridable via kwargs."""
     defaults = dict(
-        session_id="test",
+        run_id="test",
         turn=2,
         phase="challenge",
         claims={},

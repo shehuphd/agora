@@ -34,7 +34,7 @@ def build_export_dict(
     acts_out = [
         {
             "act_id":        a.act_id,
-            "session_id":    a.session_id,
+            "run_id":        a.run_id,
             "turn":          a.turn,
             "agent":         a.agent,
             "agent_role":    a.agent_role,
@@ -54,7 +54,7 @@ def build_export_dict(
     claims_out = [
         {
             "claim_id":    c.claim_id,
-            "session_id":  c.session_id,
+            "run_id":      c.run_id,
             "author":      c.author,
             "content":     c.content,
             "status":      c.status,
@@ -66,7 +66,7 @@ def build_export_dict(
     status = "closed" if (state.phase == "closed" or state.closure_reason) else "running"
 
     return {
-        "session_id":    state.session_id,
+        "run_id":        state.run_id,
         "created_at":    state.created_at,
         "closed_at":     state.closed_at,
         "status":        status,
@@ -125,7 +125,7 @@ def build_markdown(data: dict) -> str:
     total_in  = sum(v[0] for v in tok.values())
     total_out = sum(v[1] for v in tok.values())
 
-    title    = data.get("debate_title") or data.get("topic") or data.get("session_id", "Debate")
+    title    = data.get("debate_title") or data.get("topic") or data.get("run_id", "Debate")
     steelman = cfg.get("steelman_mode", False)
 
     lines: list[str] = [
@@ -137,7 +137,7 @@ def build_markdown(data: dict) -> str:
         "",
         "| Field | Value |",
         "|-------|-------|",
-        f"| Session | `{data.get('session_id', '')}` |",
+        f"| Run | `{data.get('run_id', '')}` |",
         f"| Date | {date_str} |",
         f"| Time | {time_str} |",
         f"| Topic | {data.get('topic', '')} |",
