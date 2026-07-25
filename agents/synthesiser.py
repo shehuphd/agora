@@ -84,13 +84,7 @@ class SynthesiserAgent(BaseAgent):
             config=config or {},
         )
 
-    def generate(self, state: DialogueState) -> Act:
-        """Generate argument map after debate closes; returns a structured ARGUMENT_MAP act."""
-        system, user = self._build_prompt(state)
-        if self._provider == "anthropic":
-            raw, input_tok, output_tok = self._call_anthropic(system, user)
-        else:
-            raw, input_tok, output_tok = self._call_openai(system, user)
+    def _parse_result(self, raw, state, input_tok, output_tok):
         return self._parse_synthesiser_response(raw, state, input_tok, output_tok)
 
     def _build_prompt(self, state: DialogueState) -> tuple[str, str]:

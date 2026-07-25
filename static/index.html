@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Agora</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;1,500;1,600&family=DM+Sans:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -16,8 +19,13 @@
   </div>
   <a class="nav-tab" href="#/history">history</a>
   <a class="nav-tab" href="#/new">new debate</a>
+  <a class="nav-tab" href="#/experiments">experiments</a>
+  <a class="nav-tab" href="#/traces">traces</a>
   <a class="nav-tab" href="#/settings">settings</a>
   <div class="nav-right">
+    <button class="theme-toggle" id="btn-theme-toggle" aria-label="toggle dark mode">
+      <i class="ti ti-moon" aria-hidden="true"></i>
+    </button>
     <a class="nav-token-chip" href="#/settings">
       <i class="ti ti-cpu" aria-hidden="true"></i>
       all-time
@@ -40,6 +48,7 @@
 <main id="screen-history" class="screen">
   <div class="pg-head">
     <div>
+      <p class="pg-eyebrow">History</p>
       <h1 class="pg-title">debate history</h1>
       <p class="pg-sub" id="history-subtitle">loading...</p>
     </div>
@@ -103,17 +112,30 @@
 <main id="screen-new" class="screen">
   <div class="pg-head">
     <div>
+      <p class="pg-eyebrow">Configure</p>
       <h1 class="pg-title">new debate</h1>
       <p class="pg-sub">configure participants, topic, and thresholds before starting</p>
     </div>
   </div>
   <form id="new-debate-form">
 
+    <!-- Experiment field — outside cards, scopes the whole run -->
+    <div class="field-row" style="margin-bottom:20px">
+      <label class="field-label" for="experiment-name">
+        experiment
+        <span class="field-hint">(optional — creates one if it doesn't exist)</span>
+      </label>
+      <input type="text" id="experiment-name" name="experiment_name"
+             list="experiment-list" placeholder="group this run into an experiment"
+             autocomplete="off">
+      <datalist id="experiment-list"></datalist>
+    </div>
+
     <!-- Topic card -->
     <div class="card">
       <div class="card-title">
         <span><i class="ti ti-pencil" aria-hidden="true"></i> debate topic</span>
-        <button class="btn-ghost btn-sm" id="btn-random-topic" type="button">
+        <button class="btn-export btn-sm" id="btn-random-topic" type="button">
           <i class="ti ti-dice" aria-hidden="true"></i> random topic
         </button>
       </div>
@@ -133,16 +155,15 @@
     <!-- Participants card -->
     <div class="card">
       <div class="card-title"><i class="ti ti-users" aria-hidden="true"></i> participants</div>
+      <p class="participants-hint">model costs shown as $ input / output per million tokens</p>
       <div class="three-col">
 
         <!-- Proposition -->
-        <div class="agent-setup">
+        <div class="agent-setup role-prop">
           <div class="agent-setup-head">
             <div class="av av-prop">P</div>
-            <div>
-              <div class="agent-role-label">proposition · asserter</div>
-              <div class="agent-name-label" id="prop-name-preview">participant A</div>
-            </div>
+            <div class="agent-role-label">proposition · asserter</div>
+            <div class="agent-name-label" id="prop-name-preview">participant A</div>
           </div>
           <div class="field-row">
             <label class="field-label" for="prop-nickname">nickname</label>
@@ -161,13 +182,11 @@
         </div>
 
         <!-- Opposition -->
-        <div class="agent-setup">
+        <div class="agent-setup role-opp">
           <div class="agent-setup-head">
             <div class="av av-opp">O</div>
-            <div>
-              <div class="agent-role-label">opposition · critic</div>
-              <div class="agent-name-label" id="opp-name-preview">participant B</div>
-            </div>
+            <div class="agent-role-label">opposition · critic</div>
+            <div class="agent-name-label" id="opp-name-preview">participant B</div>
           </div>
           <div class="field-row">
             <label class="field-label" for="opp-nickname">nickname</label>
@@ -191,13 +210,11 @@
         </div>
 
         <!-- Moderator -->
-        <div class="agent-setup">
+        <div class="agent-setup role-mod">
           <div class="agent-setup-head">
             <div class="av av-mod">M</div>
-            <div>
-              <div class="agent-role-label">moderator + synthesiser</div>
-              <div class="agent-name-label" id="mod-name-preview">Arbiter</div>
-            </div>
+            <div class="agent-role-label">moderator + synthesiser</div>
+            <div class="agent-name-label" id="mod-name-preview">Arbiter</div>
           </div>
           <div class="field-row">
             <label class="field-label" for="mod-nickname">nickname</label>
@@ -300,7 +317,7 @@
 
     <div class="form-actions">
       <a href="#/history" class="btn-ghost">cancel</a>
-      <button type="submit" class="btn-primary">
+      <button type="submit" class="btn-primary incomplete" id="btn-new-submit">
         <i class="ti ti-arrow-right" aria-hidden="true"></i>
         review and start
       </button>
@@ -328,6 +345,7 @@
         <div class="confirm-row"><span class="confirm-key">max turns</span><span class="confirm-val" id="confirm-turns"></span></div>
         <div class="confirm-row"><span class="confirm-key">token budget</span><span class="confirm-val" id="confirm-budget"></span></div>
         <div class="confirm-row"><span class="confirm-key">protocol mode</span><span class="confirm-val" id="confirm-mode"></span></div>
+        <div class="confirm-row" id="confirm-experiment-row" style="display:none"><span class="confirm-key">experiment</span><span class="confirm-val" id="confirm-experiment"></span></div>
       </div>
       <div class="confirm-actions">
         <a href="#/new" class="btn-ghost" style="flex:1;justify-content:center">go back</a>
@@ -342,120 +360,152 @@
 
 <!-- SCREEN 4: LIVE DEBATE -->
 <main id="screen-debate" class="screen">
-  <div class="debate-header">
-    <div class="dh-nav">
-      <a href="#/history" class="dh-back-link">
-        <i class="ti ti-arrow-left" aria-hidden="true"></i> history
-      </a>
-      <div class="dh-nav-right">
-        <button class="btn-primary btn-sm" id="btn-rerun" style="display:none">
-          <i class="ti ti-refresh" aria-hidden="true"></i> rerun with same settings
-        </button>
-        <button class="btn-solid btn-sm" id="btn-continue" style="display:none">
-          <i class="ti ti-player-play" aria-hidden="true"></i> continue
-        </button>
-        <button class="btn-solid btn-sm" id="btn-export-debate-json">
-          <i class="ti ti-download" aria-hidden="true"></i> JSON
-        </button>
-        <button class="btn-solid btn-sm" id="btn-export-debate-md">
-          <i class="ti ti-markdown" aria-hidden="true"></i> .MD
-        </button>
-      </div>
-    </div>
-    <div class="dh-top">
-      <div>
-        <h1 class="dh-title" id="dh-title">loading...</h1>
-        <p class="dh-id" id="dh-id"></p>
-        <div class="dh-chips" id="dh-chips"></div>
-      </div>
-      <div class="dh-controls">
-        <span class="badge-live" id="dh-turn-badge">turn 0</span>
-        <button class="btn-ghost btn-icon" id="btn-pause" aria-label="pause debate">
-          <i class="ti ti-player-pause" aria-hidden="true"></i>
-        </button>
-        <button class="btn-danger btn-icon" id="btn-end" aria-label="end debate">
-          <i class="ti ti-x" aria-hidden="true"></i> end
-        </button>
-      </div>
-    </div>
-    <div class="token-strip">
-      <div class="tok-card">
-        <div class="tok-label">this debate</div>
-        <div class="tok-val" id="tok-total">0</div>
-        <div class="tok-model">all agents</div>
-      </div>
-      <div class="tok-card">
-        <div class="tok-label" id="tok-prop-label">proposition</div>
-        <div class="tok-val" id="tok-prop">0</div>
-        <div class="tok-model" id="tok-prop-model"></div>
-      </div>
-      <div class="tok-card">
-        <div class="tok-label" id="tok-opp-label">opposition</div>
-        <div class="tok-val" id="tok-opp">0</div>
-        <div class="tok-model" id="tok-opp-model"></div>
-      </div>
-      <div class="tok-card">
-        <div class="tok-label" id="tok-mod-label">moderator</div>
-        <div class="tok-val" id="tok-mod">0</div>
-        <div class="tok-model" id="tok-mod-model"></div>
-      </div>
-    </div>
-    <div class="budget-bar">
-      <span class="budget-label" id="budget-label">0 / 100,000 tokens used</span>
-      <div class="budget-track"><div class="budget-fill" id="budget-fill" style="width:0%"></div></div>
-      <span class="budget-pct" id="budget-pct">0%</span>
-    </div>
-  </div>
 
-  <div class="term-tracker">
-    <div class="term-row">
-      <span class="term-label">turns used</span>
-      <div class="term-bar"><div class="term-fill fill-ok" id="term-turns" style="width:0%"></div></div>
-      <span class="term-val" id="term-turns-val">0 / 8</span>
-    </div>
-    <div class="term-row">
-      <span class="term-label">open challenges</span>
-      <div class="term-bar"><div class="term-fill fill-warn" id="term-challenges" style="width:0%"></div></div>
-      <span class="term-val" id="term-challenges-val">0</span>
-    </div>
-    <div class="term-row">
-      <span class="term-label">repetition detected</span>
-      <div class="term-bar"><div class="term-fill fill-ok" id="term-rep" style="width:0%"></div></div>
-      <span class="term-val term-val-ok" id="term-rep-val">none</span>
-    </div>
-  </div>
+  <!-- ── LEFT CONTROL SIDEBAR ── -->
+  <div class="debate-sidebar">
 
-  <div class="override-bar" id="override-bar">
-    <div class="override-bar-header">
-      <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
-      <span class="override-label">mid-run override · <span id="override-count">0</span> applied this run</span>
-      <button class="override-btn" id="btn-override">adjust settings</button>
+    <a href="#/history" class="dsb-back">
+      <i class="ti ti-arrow-left" aria-hidden="true"></i> history
+    </a>
+
+    <div class="dsb-status">
+      <span class="badge-live" id="dh-turn-badge">turn 0</span>
     </div>
-    <div class="override-panel" id="override-panel" style="display:none">
-      <div class="override-field">
-        <label class="override-field-label">Token budget — current: <span id="override-current-budget">—</span></label>
-        <div class="override-field-row">
-          <input type="number" id="override-budget-input" class="override-input" min="1000" max="500000" step="1000" placeholder="new total">
-          <button class="override-quick-btn" data-delta="10000">+10k</button>
-          <button class="override-quick-btn" data-delta="20000">+20k</button>
-          <button class="override-quick-btn" data-delta="40000">+40k</button>
+
+    <div class="dsb-controls">
+      <button class="dsb-btn dsb-btn-muted" id="btn-pause" aria-label="pause debate">
+        <i class="ti ti-player-pause" aria-hidden="true"></i>
+        <span class="dsb-btn-label">pause</span>
+      </button>
+      <button class="dsb-btn dsb-btn-end" id="btn-end" aria-label="end debate">
+        <i class="ti ti-x" aria-hidden="true"></i>
+        <span class="dsb-btn-label">end debate</span>
+      </button>
+    </div>
+
+    <div class="dsb-divider"></div>
+
+    <div class="dsb-post">
+      <button class="dsb-btn dsb-btn-accent" id="btn-continue" style="display:none">
+        <i class="ti ti-player-play" aria-hidden="true"></i> continue
+      </button>
+      <button class="dsb-btn dsb-btn-muted" id="btn-rerun" style="display:none">
+        <i class="ti ti-refresh" aria-hidden="true"></i> rerun
+      </button>
+    </div>
+
+    <div class="dsb-divider"></div>
+
+    <div class="dsb-exports">
+      <button class="dsb-btn dsb-btn-muted" id="btn-export-debate-json">
+        <i class="ti ti-download" aria-hidden="true"></i> JSON
+      </button>
+      <button class="dsb-btn dsb-btn-muted" id="btn-export-debate-md">
+        <i class="ti ti-markdown" aria-hidden="true"></i> .MD
+      </button>
+    </div>
+
+  </div><!-- /debate-sidebar -->
+
+  <!-- ── MAIN CONTENT COLUMN ── -->
+  <div class="debate-main">
+
+    <div class="debate-header">
+      <h1 class="dh-title" id="dh-title">loading...</h1>
+      <p class="dh-id" id="dh-id"></p>
+      <div class="dh-chips" id="dh-chips"></div>
+      <div class="token-strip" style="margin-top:14px">
+        <div class="tok-card">
+          <div class="tok-label">this debate</div>
+          <div class="tok-val" id="tok-total">0</div>
+          <div class="tok-model">all agents</div>
+        </div>
+        <div class="tok-card">
+          <div class="tok-label" id="tok-prop-label">proposition</div>
+          <div class="tok-val" id="tok-prop">0</div>
+          <div class="tok-model" id="tok-prop-model"></div>
+        </div>
+        <div class="tok-card">
+          <div class="tok-label" id="tok-opp-label">opposition</div>
+          <div class="tok-val" id="tok-opp">0</div>
+          <div class="tok-model" id="tok-opp-model"></div>
+        </div>
+        <div class="tok-card">
+          <div class="tok-label" id="tok-mod-label">moderator</div>
+          <div class="tok-val" id="tok-mod">0</div>
+          <div class="tok-model" id="tok-mod-model"></div>
         </div>
       </div>
-      <div class="override-panel-actions">
-        <button class="btn-primary btn-sm" id="btn-override-apply">apply</button>
-        <button class="btn-ghost btn-sm" id="btn-override-cancel">cancel</button>
+      <div class="budget-bar">
+        <span class="budget-label" id="budget-label">0 / 100,000 tokens used</span>
+        <div class="budget-track"><div class="budget-fill" id="budget-fill" style="width:0%"></div></div>
+        <span class="budget-pct" id="budget-pct">0%</span>
       </div>
     </div>
-  </div>
 
-  <div class="sec-head">act log</div>
-  <div class="act-feed" id="act-feed" aria-live="polite" aria-label="debate act log"></div>
+    <div class="term-tracker">
+      <div class="term-row">
+        <span class="term-label">turns used</span>
+        <div class="term-bar"><div class="term-fill fill-ok" id="term-turns" style="width:0%"></div></div>
+        <span class="term-val" id="term-turns-val">0 / 60</span>
+      </div>
+      <div class="term-row">
+        <span class="term-label">open challenges</span>
+        <div class="term-bar"><div class="term-fill fill-warn" id="term-challenges" style="width:0%"></div></div>
+        <span class="term-val" id="term-challenges-val">0</span>
+      </div>
+      <div class="term-row">
+        <span class="term-label">repetition detected</span>
+        <div class="term-bar"><div class="term-fill fill-ok" id="term-rep" style="width:0%"></div></div>
+        <span class="term-val term-val-ok" id="term-rep-val">none</span>
+      </div>
+    </div>
+
+    <div class="override-bar" id="override-bar">
+      <div class="override-bar-header">
+        <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
+        <span class="override-label">mid-run override · <span id="override-count">0</span> applied this run</span>
+        <button class="override-btn" id="btn-override">adjust settings</button>
+      </div>
+      <div class="override-panel" id="override-panel" style="display:none">
+        <div class="override-field">
+          <label class="override-field-label">Token budget — current: <span id="override-current-budget">—</span></label>
+          <div class="override-field-row">
+            <input type="number" id="override-budget-input" class="override-input" min="1000" max="500000" step="1000" placeholder="new total">
+            <button class="override-quick-btn" data-delta="10000">+10k</button>
+            <button class="override-quick-btn" data-delta="20000">+20k</button>
+            <button class="override-quick-btn" data-delta="40000">+40k</button>
+          </div>
+        </div>
+        <div class="override-panel-actions">
+          <button class="btn-primary btn-sm" id="btn-override-apply">apply</button>
+          <button class="btn-ghost btn-sm" id="btn-override-cancel">cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-head">act log</div>
+    <div class="act-feed" id="act-feed" aria-live="polite" aria-label="debate act log"></div>
+
+  </div><!-- /debate-main -->
+
 </main>
 
-<!-- SCREEN 5: SETTINGS -->
+<!-- SCREEN 5: EXPERIMENTS -->
+<main id="screen-experiments" class="screen">
+  <!-- Populated by experiments.js -->
+</main>
+
+<!-- SCREEN 6: TRACES -->
+<main id="screen-traces" class="screen">
+  <!-- Populated by traces.js -->
+</main>
+
+<!-- SCREEN 7: SETTINGS -->
 <main id="screen-settings" class="screen">
   <div class="pg-head">
     <div>
+      <p class="pg-eyebrow">Settings</p>
       <h1 class="pg-title">settings</h1>
       <p class="pg-sub">API keys, defaults, and token tracking</p>
     </div>
@@ -515,6 +565,21 @@
     <div class="field-row" style="margin-top:8px">
       <label class="field-label" for="s-mod-model">moderator</label>
       <select class="model-select" id="s-mod-model"></select>
+    </div>
+    <div class="field-row" style="margin-top:8px">
+      <label class="field-label" for="s-synth-model">synthesiser</label>
+      <select class="model-select" id="s-synth-model"></select>
+    </div>
+    <div class="field-row" style="margin-top:16px;align-items:flex-start;flex-direction:column;gap:6px">
+      <label class="field-label" for="s-openai-responses-mode"
+        data-tooltip="Controls whether OpenAI's Responses API is used for models that support it. 'auto' prefers it for gpt-5.6-* and falls back to Chat Completions if the model rejects it. 'prefer responses' tries Responses first for all OpenAI models. 'chat only' never uses the Responses API.">
+        OpenAI Responses API
+      </label>
+      <select class="model-select" id="s-openai-responses-mode" style="max-width:340px">
+        <option value="auto">auto — prefer for supported models, fall back to Chat</option>
+        <option value="prefer_responses">prefer Responses API for all OpenAI models</option>
+        <option value="chat_only">Chat Completions only (disable Responses API)</option>
+      </select>
     </div>
   </div>
 
@@ -587,28 +652,30 @@
         </div>
       </div>
     </div>
-    <div class="thresh-row" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
-      <div class="thresh-right">
-        <input type="range" min="2" max="10" value="6" step="1" id="s-history-window"
-          oninput="this.nextElementSibling.textContent=this.value">
-        <span class="thresh-val">6</span>
+    <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);display:flex;gap:24px">
+      <div class="thresh-row" style="flex:1">
+        <div class="thresh-right">
+          <input type="range" min="2" max="10" value="6" step="1" id="s-history-window"
+            oninput="this.nextElementSibling.textContent=this.value">
+          <span class="thresh-val">6</span>
+        </div>
+        <div>
+          <span class="thresh-label">rolling history window</span>
+          <p class="field-hint" style="margin-top:3px;margin-bottom:0">How many recent acts each agent sees verbatim. Older acts are compacted to a summary. Lower = cheaper per turn; higher = richer context. Default: 6, max: 10.</p>
+        </div>
       </div>
-      <div>
-        <span class="thresh-label">rolling history window</span>
-        <p class="field-hint" style="margin-top:3px;margin-bottom:0">How many recent acts each agent sees verbatim. Older acts are compacted to a summary. Lower = cheaper per turn; higher = richer context. Default: 6, max: 10.</p>
-      </div>
-    </div>
-    <div class="thresh-row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-      <div class="thresh-right">
-        <select id="s-history-page-size" style="width:100px">
-          <option value="50">50 runs</option>
-          <option value="100">100 runs</option>
-          <option value="250">250 runs</option>
-        </select>
-      </div>
-      <div>
-        <span class="thresh-label">history page size</span>
-        <p class="field-hint" style="margin-top:3px;margin-bottom:0">Runs shown per page in the history list. Default: 50.</p>
+      <div class="thresh-row" style="flex:1">
+        <div class="thresh-right">
+          <select id="s-history-page-size" style="width:100px">
+            <option value="50">50 runs</option>
+            <option value="100">100 runs</option>
+            <option value="250">250 runs</option>
+          </select>
+        </div>
+        <div>
+          <span class="thresh-label">history page size</span>
+          <p class="field-hint" style="margin-top:3px;margin-bottom:0">Runs shown per page in the history list. Default: 50.</p>
+        </div>
       </div>
     </div>
     <div class="form-actions" style="margin-top:12px">
@@ -624,6 +691,6 @@
   </div>
 </main>
 
-<script type="module" src="/app.js?v=3"></script>
+<script type="module" src="/app.js?v=4"></script>
 </body>
 </html>

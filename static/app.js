@@ -1,19 +1,23 @@
 // app.js — SPA entry point: routing, nav, new/confirm/settings screens.
 // Hash-based routing. ES modules — no bundler required.
 
-import { loadHistory, setHistoryPageSize }  from './history.js?v=3';
-import { loadDebate }   from './debate.js';
-import { esc, formatTokens } from './render.js';
+import { loadHistory, setHistoryPageSize }  from './history.js?v=4';
+import { loadDebate }   from './debate.js?v=4';
+import { loadExperiments } from './experiments.js?v=4';
+import { loadTraces } from './traces.js?v=1';
+import { esc, formatTokens } from './render.js?v=4';
 
 // ============================================================
 // ROUTING
 // ============================================================
 
 const ROUTES = {
-  '#/history':  { screen: 'screen-history',  load: loadHistory },
-  '#/new':      { screen: 'screen-new',      load: loadNew },
-  '#/confirm':  { screen: 'screen-confirm',  load: loadConfirm },
-  '#/settings': { screen: 'screen-settings', load: loadSettings },
+  '#/history':     { screen: 'screen-history',     load: loadHistory },
+  '#/new':         { screen: 'screen-new',         load: loadNew },
+  '#/confirm':     { screen: 'screen-confirm',     load: loadConfirm },
+  '#/experiments': { screen: 'screen-experiments', load: loadExperiments },
+  '#/traces':      { screen: 'screen-traces',      load: loadTraces },
+  '#/settings':    { screen: 'screen-settings',    load: loadSettings },
 };
 
 function route() {
@@ -40,9 +44,36 @@ function route() {
 
 window.addEventListener('hashchange', route);
 document.addEventListener('DOMContentLoaded', () => {
-  route();
+  initTheme();
+  _fetchAvailableModels().then(() => route());
   loadNavTokenTotal();
 });
+
+// ============================================================
+// THEME TOGGLE
+// ============================================================
+
+function _applyThemeIcon(btn, theme) {
+  if (btn) btn.innerHTML = theme === 'dark'
+    ? '<i class="ti ti-sun" aria-hidden="true"></i>'
+    : '<i class="ti ti-moon" aria-hidden="true"></i>';
+}
+
+function initTheme() {
+  const saved = localStorage.getItem('agora-theme') || 'light';
+  document.documentElement.dataset.theme = saved;
+  const btn = document.getElementById('btn-theme-toggle');
+  _applyThemeIcon(btn, saved);
+  if (btn) btn.onclick = _toggleTheme;
+}
+
+function _toggleTheme() {
+  const isDark = document.documentElement.dataset.theme === 'dark';
+  const next = isDark ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('agora-theme', next);
+  _applyThemeIcon(document.getElementById('btn-theme-toggle'), next);
+}
 
 // ============================================================
 // HELPERS
@@ -112,7 +143,7 @@ async function loadNavTokenTotal() {
 }
 
 // ============================================================
-// AVAILABLE MODELS
+// AVAILABLE MODELS — fetched from /api/models (DB-backed, key is source of truth)
 // ============================================================
 
 const _PROP_NAMES = ['Thesis', 'Advocate', 'Prometheus', 'Affirmo', 'Proponent', 'Vindicator', 'Herald', 'Axiom', 'Credo', 'Euclid'];
@@ -121,37 +152,85 @@ const _MOD_NAMES  = ['Arbiter', 'Logos', 'Themis', 'Referee', 'Impartial', 'Ment
 
 function _pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-const ALL_MODELS = [
-  // Anthropic
-  { value: 'claude-sonnet-4-6', label: 'claude sonnet 4.6', provider: 'anthropic' },
-  { value: 'claude-opus-4-8',   label: 'claude opus 4.8',   provider: 'anthropic' },
-  { value: 'claude-haiku-4-5',  label: 'claude haiku 4.5',  provider: 'anthropic' },
-  // OpenAI — GPT-5 family (current)
-  { value: 'gpt-5.6',          label: 'gpt-5.6 (sol)',      provider: 'openai' },
-  { value: 'gpt-5.6-terra',    label: 'gpt-5.6 terra',      provider: 'openai' },
-  { value: 'gpt-5.6-luna',     label: 'gpt-5.6 luna',       provider: 'openai' },
-  { value: 'gpt-5',            label: 'gpt-5',              provider: 'openai' },
-  // OpenAI — GPT-4 family (legacy)
-  { value: 'gpt-4.1',          label: 'gpt-4.1',            provider: 'openai' },
-  { value: 'gpt-4.1-mini',     label: 'gpt-4.1 mini',       provider: 'openai' },
-  { value: 'gpt-4o',           label: 'gpt-4o',             provider: 'openai' },
-  { value: 'gpt-4o-mini',      label: 'gpt-4o mini',        provider: 'openai' },
-  // OpenAI — o-series reasoning
-  { value: 'o3',               label: 'o3',                  provider: 'openai' },
-  { value: 'o3-mini',          label: 'o3 mini',             provider: 'openai' },
-  { value: 'o4-mini',          label: 'o4 mini',             provider: 'openai' },
-  { value: 'o1',               label: 'o1',                  provider: 'openai' },
-  // Google
-  { value: 'gemini-2.0-flash', label: 'gemini 2.0 flash',   provider: 'google' },
-  { value: 'gemini-1.5-pro',   label: 'gemini 1.5 pro',     provider: 'google' },
-  { value: 'gemini-1.5-flash', label: 'gemini 1.5 flash',   provider: 'google' },
-];
+// Module-level cache — populated on load and after any key test.
+let _availableModels = [];
+
+async function _fetchAvailableModels() {
+  try {
+    const res = await fetch('/api/models');
+    if (!res.ok) return;
+    const data = await res.json();
+    _availableModels = (data.models || []).map(m => ({
+      value:    m.model_id,
+      label:    `${m.provider} ${m.display_name || m.model_id}`,
+      provider: m.provider,
+    }));
+    window._knownModels = new Set(_availableModels.map(m => m.value));
+  } catch (e) {
+    console.warn('model list fetch failed', e);
+  }
+}
 
 function _providerForModel(model) {
   if (!model) return null;
+  // Fast path: check the cached model list first.
+  const found = _availableModels.find(m => m.value === model);
+  if (found) return found.provider;
+  // Fallback: infer from prefix for models not yet in the DB.
   if (model.startsWith('claude'))  return 'anthropic';
   if (model.startsWith('gemini'))  return 'google';
+  if (model.startsWith('sonar') || model === 'r1-1776') return 'perplexity';
   return 'openai';
+}
+
+// Exposed so debate.js can check validity without importing app.js (avoids circular dep).
+// Populated once models are fetched; starts empty so no model passes pre-flight before load.
+window._knownModels = new Set();
+
+// allowEmpty: if true, prepend a blank option (value="") and don't auto-select.
+// blankLabel: text for the blank option (default: "— select a model —").
+function _buildModelSelect(sel, keyStatus, selectedValue, allowEmpty = false, blankLabel = '— select a model —') {
+  sel.innerHTML = '';
+  if (!_availableModels.length) {
+    const opt = document.createElement('option');
+    opt.disabled = true;
+    opt.textContent = 'no models available — test your API keys in Settings';
+    sel.appendChild(opt);
+    return;
+  }
+  if (allowEmpty) {
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = blankLabel;
+    sel.appendChild(blank);
+  }
+  const providers = [...new Set(_availableModels.map(m => m.provider))];
+  providers.forEach(provider => {
+    const models = _availableModels.filter(m => m.provider === provider);
+    const grp = document.createElement('optgroup');
+    grp.label = provider;
+    models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.value;
+      opt.textContent = keyStatus[m.provider] ? m.label : `${m.label} (key missing)`;
+      opt.disabled = !keyStatus[m.provider];
+      grp.appendChild(opt);
+    });
+    sel.appendChild(grp);
+  });
+  if (selectedValue) {
+    // Exact match first; prefix fallback for short IDs vs versioned IDs in DB.
+    sel.value = selectedValue;
+    if (!sel.value) {
+      const match = [...sel.options].find(o => o.value.startsWith(selectedValue));
+      if (match) sel.value = match.value;
+    }
+  }
+  // Without allowEmpty, auto-select the first enabled option so the field is never blank.
+  if (!sel.value && !allowEmpty) {
+    const first = [...sel.options].find(o => !o.disabled);
+    if (first) sel.value = first.value;
+  }
 }
 
 // ============================================================
@@ -164,13 +243,14 @@ function _prefillFromPending(cfg) {
     const el = document.getElementById(id);
     if (el && val != null) el.value = val;
   };
-  _set('topic',         cfg.topic);
-  _set('prop-model',    cfg.prop_model);
-  _set('opp-model',     cfg.opp_model);
-  _set('mod-model',     cfg.mod_model);
-  _set('prop-nickname', cfg.prop_nickname);
-  _set('opp-nickname',  cfg.opp_nickname);
-  _set('mod-nickname',  cfg.mod_nickname);
+  _set('topic',           cfg.topic);
+  _set('experiment-name', cfg.experiment_name);
+  _set('prop-model',      cfg.prop_model);
+  _set('opp-model',       cfg.opp_model);
+  _set('mod-model',       cfg.mod_model);
+  _set('prop-nickname',   cfg.prop_nickname);
+  _set('opp-nickname',    cfg.opp_nickname);
+  _set('mod-nickname',    cfg.mod_nickname);
 
   // Update nickname preview labels
   if (cfg.prop_nickname) { const el = document.getElementById('prop-name-preview'); if (el) el.textContent = cfg.prop_nickname; }
@@ -231,34 +311,77 @@ async function loadNew() {
     }
   } catch (e) { /* defaults — all disabled */ }
 
-  const _firstValid = () => ALL_MODELS.find(m => keyStatus[m.provider])?.value || null;
-
-  const DEFAULTS = {
-    'prop-model': agentCfg.proposition?.model || 'claude-sonnet-4-6',
-    'opp-model':  agentCfg.opposition?.model  || 'gpt-4o',
-    'mod-model':  agentCfg.moderator?.model   || 'claude-opus-4-8',
-  };
-  // If a default model's provider has no valid key, fall back to the first available model.
-  Object.keys(DEFAULTS).forEach(id => {
-    const provider = _providerForModel(DEFAULTS[id]);
-    if (provider && !keyStatus[provider]) {
-      DEFAULTS[id] = _firstValid() || DEFAULTS[id];
+  // Populate experiment autocomplete datalist
+  try {
+    const expRes = await fetch('/experiments');
+    if (expRes.ok) {
+      const experiments = await expRes.json();
+      const dl = document.getElementById('experiment-list');
+      if (dl) {
+        experiments.forEach(e => {
+          const opt = document.createElement('option');
+          opt.value = e.name;
+          dl.appendChild(opt);
+        });
+      }
     }
-  });
+  } catch (_) {}
+
+  const _firstValid = () => _availableModels.find(m => keyStatus[m.provider])?.value || null;
+
+  // If no working key exists at all, block the form with a clear prompt.
+  if (!_firstValid()) {
+    const form = document.getElementById('new-debate-form');
+    if (form) {
+      form.style.display = 'none';
+      const block = document.createElement('div');
+      block.className = 'no-key-block';
+      block.innerHTML = '<p>No working API key found. <a href="#/settings">Add at least one key in Settings</a> to start debates.</p>';
+      form.parentElement?.insertBefore(block, form);
+    }
+    return;
+  }
+
+  // Resolve a configured model preference to an available+valid option, or cycle to first valid.
+  const _resolveModel = (configModel) => {
+    if (!configModel) return _firstValid();
+    const exact = _availableModels.find(m => m.value === configModel && keyStatus[m.provider]);
+    if (exact) return exact.value;
+    const prefix = _availableModels.find(m => m.value.startsWith(configModel) && keyStatus[m.provider]);
+    if (prefix) return prefix.value;
+    return _firstValid();
+  };
+
+  // Use allowEmpty=true so no model is silently auto-selected.
+  // Saved settings preferences pre-fill the picker; absent preferences show "— use first available —".
+  const DEFAULTS = {
+    'prop-model': agentCfg.proposition?.model ? _resolveModel(agentCfg.proposition.model) : null,
+    'opp-model':  agentCfg.opposition?.model  ? _resolveModel(agentCfg.opposition.model)  : null,
+    'mod-model':  agentCfg.moderator?.model   ? _resolveModel(agentCfg.moderator.model)   : null,
+  };
+
+  const submitBtn = document.getElementById('btn-new-submit');
+  const topicEl   = document.getElementById('topic');
+  const _updateSubmitBtn = () => {
+    const topicOk  = !!topicEl?.value.trim();
+    const modelsOk = ['prop-model', 'opp-model', 'mod-model'].every(
+      id => document.getElementById(id)?.value
+    );
+    submitBtn?.classList.toggle('incomplete', !(topicOk && modelsOk));
+  };
+
+  topicEl?.addEventListener('input', _updateSubmitBtn);
 
   ['prop-model', 'opp-model', 'mod-model'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
-    sel.innerHTML = '';
-    ALL_MODELS.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.value;
-      opt.textContent = keyStatus[m.provider] ? m.label : `${m.label} (key missing)`;
-      opt.disabled = !keyStatus[m.provider];
-      sel.appendChild(opt);
-    });
-    sel.value = DEFAULTS[id];
+    _buildModelSelect(sel, keyStatus, DEFAULTS[id], true);
+    sel.addEventListener('change', _updateSubmitBtn);
   });
+  _updateSubmitBtn();
+  // Re-check after a tick to catch browser-restored textarea values (Chrome restores
+  // form values after JS runs, with no input event).
+  setTimeout(_updateSubmitBtn, 150);
 
   const anyKey = Object.values(keyStatus).some(v => v);
   const randBtn = document.getElementById('btn-random-topic');
@@ -274,6 +397,7 @@ async function loadNew() {
         const result = await r.json();
         if (result.ok) {
           document.getElementById('topic').value = result.topic;
+          document.getElementById('topic').dispatchEvent(new Event('input'));
           const propName = _pick(_PROP_NAMES);
           const oppName  = _pick(_OPP_NAMES);
           const modName  = _pick(_MOD_NAMES);
@@ -298,6 +422,30 @@ async function loadNew() {
     const fd = new FormData(e.target);
     const cfg = Object.fromEntries(fd.entries());
 
+    // Flash all missing required fields and abort. This runs even when the button looks incomplete
+    // so clicking always gives the user visual feedback about exactly what's missing.
+    const _flashEl = (el, eventName = 'input') => {
+      el.classList.remove('field-error');
+      void el.offsetWidth; // force reflow so animation restarts each click
+      el.classList.add('field-error');
+      el.addEventListener(eventName, () => el.classList.remove('field-error'), { once: true });
+    };
+    const missingEls = [];
+    if (!cfg.topic?.trim()) {
+      const el = document.getElementById('topic');
+      if (el) { _flashEl(el, 'input'); missingEls.push(el); }
+    }
+    for (const [field] of [['prop_model'], ['opp_model'], ['mod_model']]) {
+      if (!cfg[field]) {
+        const sel = document.querySelector(`select[name="${field}"]`);
+        if (sel) { _flashEl(sel, 'change'); missingEls.push(sel); }
+      }
+    }
+    if (missingEls.length) {
+      missingEls[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
     cfg.prop_temperature     = parseFloat(cfg.prop_temperature) / 10;
     cfg.opp_temperature      = parseFloat(cfg.opp_temperature)  / 10;
     cfg.opp_aggression       = parseFloat(cfg.opp_aggression)   / 10;
@@ -321,7 +469,7 @@ async function loadNew() {
   // but if the user clicks "go back" from confirm we restore their settings here.
   const _raw = sessionStorage.getItem('pendingDebate');
   if (_raw) {
-    try { _prefillFromPending(JSON.parse(_raw)); } catch (_) {}
+    try { _prefillFromPending(JSON.parse(_raw)); _updateSubmitBtn(); } catch (_) {}
   }
 }
 
@@ -341,11 +489,34 @@ function loadConfirm() {
   document.getElementById('confirm-turns').textContent  = cfg.max_turns;
   document.getElementById('confirm-budget').textContent = `${Math.round(cfg.token_budget / 1000)}k tokens`;
   document.getElementById('confirm-mode').textContent   = cfg.require_steelman ? 'Rapoport (steelman required)' : 'standard';
+  const expRow = document.getElementById('confirm-experiment-row');
+  if (expRow) {
+    const name = (cfg.experiment_name || '').trim();
+    expRow.style.display = name ? '' : 'none';
+    if (name) document.getElementById('confirm-experiment').textContent = name;
+  }
 
-  document.getElementById('confirm-start-btn').onclick = async () => {
-    const btn = document.getElementById('confirm-start-btn');
-    btn.disabled = true;
-    btn.textContent = 'starting...';
+  // Pre-flight: check that all selected models are still in the known-working list.
+  const _badConfirmModels = [
+    { role: 'proposition', model: cfg.prop_model },
+    { role: 'opposition',  model: cfg.opp_model  },
+    { role: 'moderator',   model: cfg.mod_model  },
+  ].filter(r => r.model && !window._knownModels.has(r.model));
+
+  const startBtn = document.getElementById('confirm-start-btn');
+  if (_badConfirmModels.length) {
+    const names = _badConfirmModels.map(b => `${b.role} (${b.model})`).join(', ');
+    const warn = document.createElement('p');
+    warn.className = 'confirm-model-warn';
+    warn.innerHTML = `Model no longer available: ${esc(names)}. <a href="#/settings">Go to Settings →</a>`;
+    startBtn.parentElement.insertBefore(warn, startBtn);
+    startBtn.disabled = true;
+    return;
+  }
+
+  startBtn.onclick = async () => {
+    startBtn.disabled = true;
+    startBtn.textContent = 'starting...';
     try {
       const res = await fetch('/debates', {
         method: 'POST',
@@ -357,8 +528,8 @@ function loadConfirm() {
       sessionStorage.removeItem('pendingDebate');
       window.location.hash = `#/debate/${data.run_id}`;
     } catch (e) {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="ti ti-player-play"></i> retry';
+      startBtn.disabled = false;
+      startBtn.innerHTML = '<i class="ti ti-player-play"></i> retry';
       console.error('start debate failed:', e);
     }
   };
@@ -369,25 +540,16 @@ function loadConfirm() {
 // ============================================================
 
 async function loadSettings() {
+  const container = document.getElementById('api-key-status');
+  container.innerHTML = '<p class="keys-verifying"><i class="ti ti-loader-2 spin" aria-hidden="true"></i> verifying API keys…</p>';
   try {
     const res = await fetch('/settings');
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
 
-    const container = document.getElementById('api-key-status');
     container.innerHTML = '';
-    const KEY_MAP = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', google: 'GOOGLE_API_KEY' };
+    const KEY_MAP = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', google: 'GOOGLE_API_KEY', perplexity: 'PERPLEXITY_API_KEY' };
     const warnings = data.key_warnings || {};
-
-    // Map provider → which agent roles currently use it (based on model defaults).
-    const _agentsCfg = data.config?.agents || {};
-    const _rolesByProvider = {};
-    [['proposition', _agentsCfg.proposition?.model],
-     ['opposition',  _agentsCfg.opposition?.model],
-     ['moderator',   _agentsCfg.moderator?.model]].forEach(([role, model]) => {
-      const p = _providerForModel(model);
-      if (p) (_rolesByProvider[p] = _rolesByProvider[p] || []).push(role);
-    });
 
     Object.entries(KEY_MAP).forEach(([provider, envName]) => {
       const info = data.key_info?.[provider] || { present: false, valid: false, error: null };
@@ -401,9 +563,10 @@ async function loadSettings() {
       if (info.valid) {
         statusHtml = `<span class="key-status-ok"><i class="ti ti-check" aria-hidden="true"></i> valid</span>`;
       } else if (info.present) {
-        const errText = info.error ? esc(info.error.length > 45 ? info.error.slice(0, 45) + '…' : info.error) : 'check your key';
+        const fullErr = info.error || 'check your key';
+        const shortErr = fullErr.length > 50 ? fullErr.slice(0, 50) + '…' : fullErr;
         statusHtml = `<span class="key-status-invalid"><i class="ti ti-x" aria-hidden="true"></i> invalid</span>`
-                   + `<span class="key-status-error">${errText}</span>`;
+                   + `<span class="key-status-error" title="${esc(fullErr)}">${esc(shortErr)}</span>`;
       } else {
         statusHtml = `<span class="key-status-missing"><i class="ti ti-minus" aria-hidden="true"></i> missing</span>`;
       }
@@ -414,19 +577,23 @@ async function loadSettings() {
            </span>`
         : '';
 
-      const usedByRoles = _rolesByProvider[provider] || [];
-      const usedByHtml  = usedByRoles.length
-        ? `<span class="key-used-by">used by: ${usedByRoles.join(' · ')}</span>`
-        : `<span class="key-used-by key-used-by-none">not in use</span>`;
+      const modelCount = _availableModels.filter(m => m.provider === provider).length;
+      const usedByHtml = (info.valid && modelCount > 0)
+        ? `<span class="key-used-by">${modelCount} model${modelCount !== 1 ? 's' : ''} available</span>`
+        : '';
 
       row.innerHTML = `
         <span class="key-name">${esc(envName)}</span>
-        ${statusHtml}
+        <span class="key-status-group">${statusHtml}${warnHtml}</span>
         ${usedByHtml}
-        ${warnHtml}
-        <button class="btn-ghost key-edit-btn" data-provider="${esc(provider)}" style="font-size:11px;margin-left:auto">
-          <i class="ti ti-pencil" aria-hidden="true"></i> edit
-        </button>
+        <div class="key-actions">
+          <button class="btn-ghost key-test-btn" style="font-size:11px">
+            <i class="ti ti-refresh" aria-hidden="true"></i> test
+          </button>
+          <button class="btn-ghost key-edit-btn" data-provider="${esc(provider)}" style="font-size:11px">
+            <i class="ti ti-pencil" aria-hidden="true"></i> edit
+          </button>
+        </div>
       `;
 
       // Inline edit form, hidden by default.
@@ -442,6 +609,48 @@ async function loadSettings() {
       `;
       container.appendChild(row);
       container.appendChild(editForm);
+
+      // Wire test button
+      row.querySelector('.key-test-btn').onclick = async () => {
+        const testBtn = row.querySelector('.key-test-btn');
+        const statusGroup = row.querySelector('.key-status-group');
+        testBtn.disabled = true;
+        testBtn.innerHTML = '<i class="ti ti-loader-2 spin" aria-hidden="true"></i>';
+        let validResult = false;
+        try {
+          const r = await fetch(`/settings/keys/${provider}/test`, { method: 'POST' });
+          if (!r.ok) throw new Error(await r.text());
+          const info = await r.json();
+          let newStatusHtml;
+          if (info.valid) {
+            validResult = true;
+            newStatusHtml = `<span class="key-status-ok"><i class="ti ti-check" aria-hidden="true"></i> valid</span>`;
+          } else if (info.present) {
+            const fullErr = info.error || 'check your key';
+            const shortErr = fullErr.length > 50 ? fullErr.slice(0, 50) + '…' : fullErr;
+            newStatusHtml = `<span class="key-status-invalid"><i class="ti ti-x" aria-hidden="true"></i> invalid</span>`
+                         + `<span class="key-status-error" title="${esc(fullErr)}">${esc(shortErr)}</span>`;
+          } else {
+            newStatusHtml = `<span class="key-status-missing"><i class="ti ti-minus" aria-hidden="true"></i> missing</span>`;
+          }
+          statusGroup.innerHTML = newStatusHtml;
+          // Refresh the model list so the picker reflects the newly-tested key.
+          if (validResult) await _fetchAvailableModels();
+        } catch (err) {
+          console.error('key test failed:', err);
+        } finally {
+          if (validResult) {
+            testBtn.innerHTML = '<i class="ti ti-check" style="color:var(--text-success)" aria-hidden="true"></i>';
+            setTimeout(() => {
+              testBtn.disabled = false;
+              testBtn.innerHTML = '<i class="ti ti-refresh" aria-hidden="true"></i> test';
+            }, 1200);
+          } else {
+            testBtn.disabled = false;
+            testBtn.innerHTML = '<i class="ti ti-refresh" aria-hidden="true"></i> test';
+          }
+        }
+      };
 
       // Wire toggle
       row.querySelector('.key-edit-btn').onclick = () => {
@@ -508,23 +717,20 @@ async function loadSettings() {
     const agentCfg   = data.config?.agents || {};
     const keyStatus2 = data.key_status || {};
     const MODEL_ROLE_MAP = {
-      's-prop-model': agentCfg.proposition?.model || 'claude-sonnet-4-6',
-      's-opp-model':  agentCfg.opposition?.model  || 'gpt-4o',
-      's-mod-model':  agentCfg.moderator?.model   || 'claude-opus-4-8',
+      's-prop-model':  agentCfg.proposition?.model  || null,
+      's-opp-model':   agentCfg.opposition?.model   || null,
+      's-mod-model':   agentCfg.moderator?.model    || null,
+      's-synth-model': agentCfg.synthesiser?.model  || null,
     };
     Object.entries(MODEL_ROLE_MAP).forEach(([selId, defaultModel]) => {
       const sel = document.getElementById(selId);
       if (!sel) return;
-      sel.innerHTML = '';
-      ALL_MODELS.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.value;
-        opt.textContent = keyStatus2[m.provider] ? m.label : `${m.label} (key missing)`;
-        opt.disabled = !keyStatus2[m.provider];
-        sel.appendChild(opt);
-      });
-      sel.value = defaultModel;
+      _buildModelSelect(sel, keyStatus2, defaultModel, true, '— no preference —');
     });
+
+    // Responses API mode selector.
+    const responsesModeSel = document.getElementById('s-openai-responses-mode');
+    if (responsesModeSel) responsesModeSel.value = data.config?.openai?.responses_mode || 'auto';
 
     const hw = data.config?.agent_settings?.history_window;
     if (hw != null) {
@@ -572,9 +778,13 @@ async function loadSettings() {
         history_page_size: parseInt(document.getElementById('s-history-page-size')?.value || '50'),
       },
       agents: {
-        proposition: { model: document.getElementById('s-prop-model')?.value },
-        opposition:  { model: document.getElementById('s-opp-model')?.value },
-        moderator:   { model: document.getElementById('s-mod-model')?.value },
+        proposition: { model: document.getElementById('s-prop-model')?.value || null },
+        opposition:  { model: document.getElementById('s-opp-model')?.value  || null },
+        moderator:   { model: document.getElementById('s-mod-model')?.value  || null },
+        synthesiser: { model: document.getElementById('s-synth-model')?.value || null },
+      },
+      openai: {
+        responses_mode: document.getElementById('s-openai-responses-mode')?.value || 'auto',
       },
     };
     await fetch('/settings', {

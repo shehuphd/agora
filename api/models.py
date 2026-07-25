@@ -18,9 +18,9 @@ class DebateConfig(BaseModel):
         return v
     debate_title: Optional[str] = None
     # Long-name canonical fields (used internally and in exports).
-    proposition_model: str = "claude-sonnet-4-6"
-    opposition_model: str = "gpt-4o"
-    moderator_model: str = "claude-opus-4-8"
+    proposition_model: Optional[str] = None
+    opposition_model: Optional[str] = None
+    moderator_model: Optional[str] = None
     proposition_nickname: str = "Thesis"
     opposition_nickname: str = "Antithesis"
     temperature_proposition: float = 0.7
@@ -31,6 +31,7 @@ class DebateConfig(BaseModel):
     prop_model: Optional[str] = None
     opp_model: Optional[str] = None
     mod_model: Optional[str] = None
+    synth_model: Optional[str] = None
     prop_nickname: Optional[str] = None
     opp_nickname: Optional[str] = None
     prop_temperature: Optional[float] = None
@@ -45,6 +46,7 @@ class DebateConfig(BaseModel):
     require_steelman: bool = False
     require_full_resolution: bool = False
     auto_generate_title: bool = True
+    experiment_name: Optional[str] = None
 
 
 class ActResponse(BaseModel):

@@ -64,6 +64,13 @@ export const ACT_BUBBLE_CLASS = {
   MODERATOR_INTERVENTION: 'act-mod',
 };
 
+const ROLE_BUBBLE_CLASS = {
+  proposition: 'act-prop',
+  opposition:  'act-opp',
+  moderator:   'act-mod',
+  synthesiser: 'act-synth',
+};
+
 export const PILL_CLASS = {
   proposition: 'pill-prop',
   opposition:  'pill-opp',
@@ -88,12 +95,24 @@ export function appendSystemBubble(iconClass, text) {
   div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
+export function appendModelWarningBubble(badModels) {
+  const feed = document.getElementById('act-feed');
+  if (!feed) return;
+  const names = badModels.map(b => `${esc(b.role)} (${esc(b.model)})`).join(', ');
+  const div = document.createElement('div');
+  div.className = 'act-bubble act-error';
+  div.innerHTML = `<div class="act-text"><i class="ti ti-alert-triangle" aria-hidden="true"></i> `
+    + `Model no longer available: ${names}. `
+    + `<a href="#/settings" style="color:inherit;text-decoration:underline;font-weight:600">Open Settings →</a></div>`;
+  feed.appendChild(div);
+}
+
 export function appendActBubble(act) {
   if (act.act_type === 'STATUS')       { appendStatusBubble(act); return; }
   if (act.act_type === 'ARGUMENT_MAP') { appendArgumentMapBubble(act); return; }
 
   const feed      = document.getElementById('act-feed');
-  const bubbleCls = ACT_BUBBLE_CLASS[act.act_type] || '';
+  const bubbleCls = ACT_BUBBLE_CLASS[act.act_type] || ROLE_BUBBLE_CLASS[act.agent_role] || '';
   const pillCls   = PILL_CLASS[act.agent_role] || 'pill-mod';
   const label     = ACT_LABEL[act.act_type]
     ? `<span class="act-label">· ${esc(ACT_LABEL[act.act_type])}</span>` : '';
@@ -250,7 +269,7 @@ export function markDebateClosed() {
   if (endBtn) endBtn.disabled = true;
 
   const rerunBtn = document.getElementById('btn-rerun');
-  if (rerunBtn) rerunBtn.style.display = 'inline-flex';
+  if (rerunBtn) rerunBtn.style.display = 'flex';
 
   const feed = document.getElementById('act-feed');
   if (feed && !feed.querySelector('.debate-end-cta')) {

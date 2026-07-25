@@ -123,10 +123,9 @@ class ModeratorAgent(BaseAgent):
     def generate(self, state: DialogueState, should_close: bool = False, closure_reason: str = None) -> Act:
         """Generate STATUS or CLOSE act based on current state and termination signal."""
         system, user = self._build_prompt(state, should_close=should_close, closure_reason=closure_reason)
-        if self._provider == "anthropic":
-            raw, input_tok, output_tok = self._call_anthropic(system, user)
-        else:
-            raw, input_tok, output_tok = self._call_openai(system, user)
+        return self._traced_generate(state, system, user)
+
+    def _parse_result(self, raw, state, input_tok, output_tok):
         return self._parse_moderator_response(raw, state, input_tok, output_tok)
 
     def _build_prompt(self, state: DialogueState, should_close: bool = False, closure_reason: str = None) -> tuple[str, str]:
@@ -138,8 +137,12 @@ class ModeratorAgent(BaseAgent):
             None,
         )
         sourcing_warning = (
-            "The previous act names sources or authors without providing hyperlinks. "
-            "Note this in moderator_note so participants are reminded of the citation rule."
+            f"CITATION VIOLATION: {last_substantive.agent_role} ({last_substantive.agent}) named "
+            f"sources or authors in turn {last_substantive.turn} without providing hyperlinks. "
+            f"In your STATUS, set moderator_note to: "
+            f"'CITATION VIOLATION — {last_substantive.agent_role} must supply working hyperlinks "
+            f"for all named sources in their next act, or retract the unsourced claims. "
+            f"No new sub-claims may be asserted until this is resolved.'"
             if last_substantive and _has_unsourced_citations(last_substantive.content)
             else None
         )

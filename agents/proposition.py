@@ -48,10 +48,13 @@ CLAIM STANDARDS
   source: [Source Name](https://exact-url). Vague references to "research", "studies",
   or "experts" without a link are not permitted.
   If you reference a named study, report, or author, it MUST have a hyperlink.
-  If you cannot verify a real, publicly accessible URL for a specific source, do NOT name
-  it — describe the evidence class instead ("multiple peer-reviewed RCTs show…") but you
-  MUST still include at least one linked source elsewhere in the act.
-  Inventing a URL is a critical protocol violation — only link sources you can verify.
+  Before including any URL, use web search to confirm the page exists and supports your
+  claim. If web search fails to confirm the source, do NOT cite it by name or URL.
+  Use general evidence class language instead ("multiple peer-reviewed RCTs show…") but
+  you MUST still include at least one verified linked source elsewhere in the act.
+  Fabricating a URL — even one that looks plausible — is a critical protocol violation.
+  A fabricated URL is worse than no citation: it poisons the debate record and will be
+  challenged. When in doubt, omit the specific reference; do not guess.
 - Claim content: under 200 words. Revisions narrow scope; do not wholesale replace.
 - Formatting: when a DEFEND or REVISE response addresses multiple objections, write each
   point as its own paragraph separated by a blank line. Do not pack all points into one block.

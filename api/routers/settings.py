@@ -1,4 +1,4 @@
-"""Settings router — API key status, config management, token reset."""
+"""Settings router — API key status, config management, token reset, model registry."""
 import asyncio
 import json
 import os
@@ -10,52 +10,45 @@ from pathlib import Path
 import yaml
 from fastapi import APIRouter, HTTPException
 from dotenv import load_dotenv, set_key as dotenv_set_key
+from traceact import ActionTrace
+from providers import get_key_env, list_provider_names, test_key_async, list_models_async
+from core import runs_db as _runs_db
 
 # ------------------------------------------------------------------
 # Key validation cache — avoids an API round-trip on every page load.
-# Cache entries expire after 60 s or when the key value changes.
+# Entries expire after 60 s or when the key value changes.
 # ------------------------------------------------------------------
 _key_cache: dict = {}  # {provider: {"key": str, "result": dict, "ts": float}}
 _CACHE_TTL = 60  # seconds
 
 
-def _test_anthropic_key(value: str) -> dict:
-    try:
-        import anthropic
-        anthropic.Anthropic(api_key=value).models.list(limit=1)
-        return {"present": True, "valid": True, "error": None}
-    except Exception as e:
-        msg = str(e).lower()
-        friendly = "Invalid API key" if any(w in msg for w in ("auth", "invalid", "unauthorized", "403", "401")) else str(e)[:60]
-        return {"present": True, "valid": False, "error": friendly}
-
-
-def _test_openai_key(value: str) -> dict:
-    try:
-        from openai import OpenAI
-        OpenAI(api_key=value).models.list()
-        return {"present": True, "valid": True, "error": None}
-    except Exception as e:
-        msg = str(e).lower()
-        friendly = "Invalid API key" if any(w in msg for w in ("auth", "invalid", "unauthorized", "incorrect", "403", "401")) else str(e)[:60]
-        return {"present": True, "valid": False, "error": friendly}
-
-
-def _test_google_key(value: str) -> dict:
-    try:
-        from google import genai
-        client = genai.Client(api_key=value)
-        for _ in client.models.list():
-            break
-        return {"present": True, "valid": True, "error": None}
-    except Exception as e:
-        msg = str(e).lower()
-        friendly = "Invalid API key" if any(w in msg for w in ("api_key_invalid", "invalid", "unauthorized", "forbidden", "403", "401")) else str(e)[:60]
-        return {"present": True, "valid": False, "error": friendly}
+async def _refresh_models_for_provider(provider: str, key: str, valid: bool) -> None:
+    """After a key test, update provider_models in the DB to match current access."""
+    with ActionTrace.start(action="provider.model_sync", kind="app", actor="system",
+                           project="agora", meta={"provider": provider}) as t:
+        t.input({"provider": provider, "valid": valid})
+        conn = _runs_db.connect()
+        _runs_db.init(conn)
+        if valid:
+            models = await list_models_async(provider, key)
+            _runs_db.upsert_provider_models(
+                conn, provider,
+                [{"model_id": m.model_id, "display_name": m.display_name, "endpoint_type": m.endpoint_type}
+                 for m in models],
+            )
+            t.output({"provider": provider, "model_count": len(models)})
+        else:
+            _runs_db.deactivate_provider_models(conn, provider)
+            t.output({"provider": provider, "deactivated": True})
+        conn.close()
 
 
 async def _validate_all_keys(keys: dict) -> dict:
-    """Validate all API keys concurrently; uses a 60 s per-value cache."""
+    """Validate all API keys concurrently; uses a 60 s per-value cache.
+
+    On each validation, also refreshes the provider_models DB so the model
+    picker stays in sync with what each key can actually access.
+    """
     now = time.time()
     result = {}
     to_validate = {}
@@ -71,14 +64,11 @@ async def _validate_all_keys(keys: dict) -> dict:
             to_validate[provider] = value
 
     if to_validate:
-        _fns = {"anthropic": _test_anthropic_key, "openai": _test_openai_key, "google": _test_google_key}
-
         async def _run(provider: str, value: str):
-            try:
-                r = await asyncio.wait_for(asyncio.to_thread(_fns[provider], value), timeout=6.0)
-            except asyncio.TimeoutError:
-                r = {"present": True, "valid": False, "error": "Connection timed out"}
+            r = await test_key_async(provider, value)
             _key_cache[provider] = {"key": value, "result": r, "ts": time.time()}
+            # Fire-and-forget model refresh (don't block the key status response).
+            asyncio.create_task(_refresh_models_for_provider(provider, value, r.get("valid", False)))
             return provider, r
 
         for provider, r in await asyncio.gather(*[_run(p, v) for p, v in to_validate.items()]):
@@ -150,9 +140,13 @@ _FACTORY_DEFAULTS = {
     "agent_settings": {"history_window": 6},
     "ui": {"history_page_size": 50},
     "agents": {
-        "proposition": {"model": "claude-sonnet-4-6", "temperature": 0.7, "max_claims": 5},
-        "opposition":  {"model": "claude-opus-4-8",   "temperature": 0.4, "aggression": 0.8},
-        "moderator":   {"model": "claude-haiku-4-5",  "temperature": 0.3, "auto_generate_title": True},
+        "proposition": {"temperature": 0.7, "max_claims": 5},
+        "opposition":  {"temperature": 0.4, "aggression": 0.8},
+        "moderator":   {"temperature": 0.3, "auto_generate_title": True},
+        "synthesiser": {"temperature": 0.3},
+    },
+    "openai": {
+        "responses_mode": "auto",
     },
     "output": {
         "generate_markdown": True,
@@ -174,11 +168,12 @@ _FACTORY_DEFAULTS = {
 RUNS_DIR       = Path(__file__).parent.parent.parent / "runs"
 _WARNINGS_PATH = Path(__file__).parent.parent.parent / "config" / "key_warnings.json"
 
-_KEY_ENV_NAMES = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai":    "OPENAI_API_KEY",
-    "google":    "GOOGLE_API_KEY",
-}
+def _key_env_name(provider: str) -> str:
+    """Return the env var name for a provider's API key. Raises 400 for unknown providers."""
+    try:
+        return get_key_env(provider)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
 
 def _load_key_warnings() -> dict:
@@ -200,7 +195,7 @@ def _load_config() -> dict:
 
 
 def _total_tokens_from_runs() -> dict:
-    """Sum token usage across all debate DBs in runs/."""
+    """Sum token usage across all debate DBs in runs/, respecting any reset event."""
     totals = {"input_tokens": 0, "output_tokens": 0}
     if not RUNS_DIR.exists():
         return totals
@@ -210,7 +205,11 @@ def _total_tokens_from_runs() -> dict:
             continue
         try:
             conn = sqlite3.connect(str(db_path))
-            row = conn.execute("SELECT SUM(input_tokens), SUM(output_tokens) FROM acts").fetchone()
+            row = conn.execute(
+                "SELECT SUM(input_tokens), SUM(output_tokens) FROM acts"
+                " WHERE timestamp > COALESCE("
+                "  (SELECT value FROM meta WHERE key='token_reset_event'), '')"
+            ).fetchone()
             conn.close()
             if row and row[0]:
                 totals["input_tokens"] += row[0]
@@ -227,9 +226,8 @@ async def get_settings():
     raw_totals = _total_tokens_from_runs()
 
     raw_keys = {
-        "anthropic": (os.environ.get("ANTHROPIC_API_KEY") or "").strip(),
-        "openai":    (os.environ.get("OPENAI_API_KEY")    or "").strip(),
-        "google":    (os.environ.get("GOOGLE_API_KEY")    or "").strip(),
+        p: (os.environ.get(get_key_env(p)) or "").strip()
+        for p in list_provider_names()
     }
     key_info   = await _validate_all_keys(raw_keys)
     # key_status stays True only for valid keys — gates model dropdowns everywhere.
@@ -239,8 +237,8 @@ async def get_settings():
         "key_info":   key_info,
         "key_status": key_status,
         # legacy fields
-        "anthropic_key_present": key_status["anthropic"],
-        "openai_key_present":    key_status["openai"],
+        "anthropic_key_present": key_status.get("anthropic", False),
+        "openai_key_present":    key_status.get("openai", False),
         "config": _load_config(),
         "token_totals": {
             "total":  raw_totals["input_tokens"] + raw_totals["output_tokens"],
@@ -256,48 +254,61 @@ async def get_settings():
 @router.post("/settings")
 async def update_settings(updates: dict):
     """Merge updates into defaults.yaml and persist."""
-    config = _load_config()
-    _deep_merge(config, updates)
-    with open(CONFIG_PATH, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
-    # Apply agent settings immediately so the running server reflects the change.
-    hw = config.get("agent_settings", {}).get("history_window")
-    if hw is not None:
-        from agents.base import set_history_window
-        set_history_window(hw)
+    with ActionTrace.start(action="settings.save", kind="app", actor="user",
+                           project="agora") as t:
+        t.input({"keys_updated": list(updates.keys())})
+        config = _load_config()
+        _deep_merge(config, updates)
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+        hw = config.get("agent_settings", {}).get("history_window")
+        if hw is not None:
+            from agents.base import set_history_window
+            set_history_window(hw)
+        from providers import configure as _configure_providers
+        _configure_providers(config)
+        t.output({"status": "ok"})
     return {"status": "ok", "config": config}
 
 
 @router.post("/settings/reset-defaults")
 async def reset_defaults():
     """Overwrite defaults.yaml with factory values."""
-    with open(CONFIG_PATH, "w") as f:
-        yaml.dump(_FACTORY_DEFAULTS, f, default_flow_style=False)
-    from agents.base import set_history_window
-    set_history_window(_FACTORY_DEFAULTS["agent_settings"]["history_window"])
+    with ActionTrace.start(action="settings.reset_defaults", kind="app", actor="user",
+                           project="agora") as t:
+        t.input({})
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(_FACTORY_DEFAULTS, f, default_flow_style=False)
+        from agents.base import set_history_window
+        set_history_window(_FACTORY_DEFAULTS["agent_settings"]["history_window"])
+        t.output({"status": "ok"})
     return {"status": "ok", "config": _FACTORY_DEFAULTS}
 
 
 @router.post("/settings/reset-tokens")
 async def reset_tokens():
     """Write a token_reset_event to the meta table in all run DBs."""
-    now = datetime.utcnow().isoformat()
-    count = 0
-    if RUNS_DIR.exists():
-        for run_dir in RUNS_DIR.iterdir():
-            db_path = run_dir / "debate.db"
-            if db_path.exists():
-                try:
-                    conn = sqlite3.connect(str(db_path))
-                    conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                        ("token_reset_event", now),
-                    )
-                    conn.commit()
-                    conn.close()
-                    count += 1
-                except Exception:
-                    continue
+    with ActionTrace.start(action="settings.reset_tokens", kind="app", actor="user",
+                           project="agora") as t:
+        t.input({})
+        now = datetime.utcnow().isoformat()
+        count = 0
+        if RUNS_DIR.exists():
+            for run_dir in RUNS_DIR.iterdir():
+                db_path = run_dir / "debate.db"
+                if db_path.exists():
+                    try:
+                        conn = sqlite3.connect(str(db_path))
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                            ("token_reset_event", now),
+                        )
+                        conn.commit()
+                        conn.close()
+                        count += 1
+                    except Exception:
+                        continue
+        t.output({"reset_at": now, "databases_updated": count})
     return {"status": "ok", "reset_at": now, "databases_updated": count}
 
 
@@ -306,26 +317,62 @@ async def update_key(payload: dict):
     """Write a single API key to .env. Payload: {provider: str, value: str}."""
     provider = payload.get("provider", "").lower()
     value    = (payload.get("value") or "").strip()
-    if provider not in _KEY_ENV_NAMES:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
-    env_name = _KEY_ENV_NAMES[provider]
-    # Create .env if it doesn't exist yet.
-    if not _ENV_PATH.exists():
-        _ENV_PATH.touch()
-    dotenv_set_key(str(_ENV_PATH), env_name, value)
-    # Reload so the running process picks up the change immediately.
-    load_dotenv(dotenv_path=_ENV_PATH, override=True)
-    os.environ[env_name] = value
-    # Bust the validation cache so the next GET /settings re-tests this key.
-    _key_cache.pop(provider, None)
-    # If the key is being set (non-empty), clear any existing quota warning for this provider.
-    if value:
-        warnings = _load_key_warnings()
-        if provider in warnings:
-            del warnings[provider]
-            with open(_WARNINGS_PATH, "w") as f:
-                json.dump(warnings, f)
+    env_name = _key_env_name(provider)  # raises 400 for unknown providers
+    with ActionTrace.start(action="settings.key_save", kind="app", actor="user",
+                           project="agora", meta={"provider": provider}) as t:
+        t.input({"provider": provider, "key_present": bool(value)})
+        if not _ENV_PATH.exists():
+            _ENV_PATH.touch()
+        dotenv_set_key(str(_ENV_PATH), env_name, value, quote_mode="never")
+        load_dotenv(dotenv_path=_ENV_PATH, override=True)
+        os.environ[env_name] = value
+        _key_cache.pop(provider, None)
+        if value:
+            warnings = _load_key_warnings()
+            if provider in warnings:
+                del warnings[provider]
+                with open(_WARNINGS_PATH, "w") as f:
+                    json.dump(warnings, f)
+        t.output({"status": "ok", "provider": provider, "key_present": bool(value)})
     return {"status": "ok", "provider": provider, "key_present": bool(value)}
+
+
+@router.post("/settings/keys/{provider}/test")
+async def test_key(provider: str):
+    """Force re-validation of one API key, bypassing the cache.
+
+    Also refreshes the provider_models DB so the model picker updates immediately.
+    Returns key_info dict.
+    """
+    env_name = _key_env_name(provider)  # raises 400 for unknown providers
+    load_dotenv(dotenv_path=_ENV_PATH, override=True)
+    value = (os.environ.get(env_name) or "").strip()
+    if not value:
+        return {"present": False, "valid": False, "error": None}
+    _key_cache.pop(provider, None)
+    with ActionTrace.start(action="settings.key_validate", kind="app", actor="user",
+                           project="agora", meta={"provider": provider}) as t:
+        t.input({"provider": provider})
+        results = await _validate_all_keys({provider: value})
+        result = results[provider]
+        t.output({"provider": provider, "valid": result.get("valid"), "error": result.get("error")})
+    return result
+
+
+@router.get("/api/models")
+async def list_models():
+    """Return all active models from the provider_models DB.
+
+    The model picker fetches this instead of using a hardcoded list.
+    Returns an empty list when no keys have been tested yet.
+    """
+    conn = _runs_db.connect()
+    _runs_db.init(conn)
+    cfg = _load_config()
+    provider_order = cfg.get("providers", {}).get("model_order")
+    models = _runs_db.list_available_models(conn, provider_order=provider_order)
+    conn.close()
+    return {"models": models}
 
 
 @router.post("/settings/clear-key-warning/{provider}")
@@ -369,7 +416,12 @@ async def open_env():
 
 @router.post("/api/random-topic")
 async def random_topic():
-    """Generate a random debate topic using the fastest available LLM."""
+    """Generate a random debate topic using the first available model from the DB.
+
+    Rotates through all confirmed-available models in provider_models order until one
+    succeeds. No provider or model is hardcoded — whoever the user has a working key
+    for will be used.
+    """
     load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
     domain = random.choice(_TOPIC_DOMAINS)
@@ -381,34 +433,35 @@ async def random_topic():
         "Return only the proposition. No preamble, no quotation marks, no full stop at the end."
     )
 
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    openai_key    = os.environ.get("OPENAI_API_KEY")
+    conn = _runs_db.connect()
+    _runs_db.init(conn)
+    _cfg = _load_config()
+    available = _runs_db.list_available_models(conn, provider_order=_cfg.get("providers", {}).get("model_order"))
+    conn.close()
 
-    try:
-        if anthropic_key:
-            import anthropic
-            client = anthropic.Anthropic(api_key=anthropic_key)
-            resp = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=60,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            topic = resp.content[0].text.strip().strip('"').strip("'")
-        elif openai_key:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                max_tokens=60,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            topic = resp.choices[0].message.content.strip().strip('"').strip("'")
-        else:
-            return {"ok": False, "error": "no API key available"}
+    if not available:
+        return {"ok": False, "error": "no models available — test an API key in Settings first"}
 
-        return {"ok": True, "topic": topic}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    import providers as _providers
+    for model_row in available:
+        prov  = model_row["provider"]
+        mid   = model_row["model_id"]
+        etype = model_row["endpoint_type"]
+        key   = (os.environ.get(_providers.get_key_env(prov)) or "").strip()
+        if not key:
+            continue
+        try:
+            text, _, _ = _providers.generate(
+                provider=prov, key=key, model_id=mid, endpoint_type=etype,
+                system="", user=prompt, temperature=0.9, max_tokens=60,
+            )
+            topic = text.strip().strip('"').strip("'").strip()
+            if topic:
+                return {"ok": True, "topic": topic}
+        except Exception:
+            pass
+
+    return {"ok": False, "error": "all available models failed to generate a topic"}
 
 
 def _deep_merge(base: dict, updates: dict) -> None:

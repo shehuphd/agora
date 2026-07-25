@@ -2,10 +2,11 @@
 import os
 import re
 import json
-import time
 import uuid
 from datetime import datetime
+from traceact import ActionTrace
 from core.state import Act, ActType, DialogueState
+from providers.base import QuotaExhaustedError  # re-exported so runners can import from here
 
 # Per-role allowlist of legal act types.  Any output outside this set is
 # rejected before apply_act — catches cross-role injection and model errors.
@@ -32,16 +33,12 @@ def set_history_window(n: int) -> None:
     global _HISTORY_WINDOW
     _HISTORY_WINDOW = max(2, min(10, int(n)))
 
-# LLM call retry settings (runs inside thread-pool executor, so time.sleep is safe).
-_MAX_ATTEMPTS = 3
-_BACKOFF_BASE  = 5   # seconds; attempt n waits _BACKOFF_BASE * 2^n
-
-
-class QuotaExhaustedError(Exception):
-    """Raised when an API provider returns a billing/quota exhaustion error (not a transient rate limit)."""
-    def __init__(self, provider: str, message: str):
-        super().__init__(message)
-        self.provider = provider
+_KEY_ENV_MAP = {
+    "anthropic":  "ANTHROPIC_API_KEY",
+    "openai":     "OPENAI_API_KEY",
+    "google":     "GOOGLE_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+}
 
 
 class BaseAgent:
@@ -57,24 +54,57 @@ class BaseAgent:
             self._provider = "anthropic"
         elif model.startswith("gemini"):
             self._provider = "google"
+        elif model.startswith("sonar") or model == "r1-1776":
+            self._provider = "perplexity"
         else:
             self._provider = "openai"
-        self._temperature_deprecated = False
+        # Look up endpoint_type from the provider_models DB; adapters use this to
+        # pick Chat Completions vs Responses API vs generate_content, etc.
+        self._endpoint_type = self._resolve_endpoint_type()
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
     def generate(self, state: DialogueState) -> Act:
-        """Build prompt, call LLM, parse and validate response into Act."""
+        """Build prompt, call LLM via the central router, parse response into Act."""
         system, user = self._build_prompt(state)
-        if self._provider == "anthropic":
-            raw, input_tok, output_tok = self._call_anthropic(system, user)
-        elif self._provider == "google":
-            raw, input_tok, output_tok = self._call_google(system, user)
-        else:
-            raw, input_tok, output_tok = self._call_openai(system, user)
+        return self._traced_generate(state, system, user)
+
+    def _parse_result(self, raw: str, state: DialogueState, input_tok: int, output_tok: int) -> Act:
+        """Parse LLM response into Act. Override in subclasses to use a role-specific parser."""
         return self._parse_response(raw, state, input_tok, output_tok)
+
+    def _traced_generate(self, state: DialogueState, system: str, user: str) -> Act:
+        """Open a trace, call the provider, parse via _parse_result, retry once on JSON failure."""
+        with ActionTrace.start(
+            action="agent.generate",
+            kind="model",
+            actor=self.role,
+            project="agora",
+            correlation_id=state.run_id,
+            meta={"model": self.model, "turn": state.turn},
+        ) as trace:
+            raw, input_tok, output_tok = self._call_provider(system, user)
+            trace.model(operation="completion", target=self.model, tokens_in=input_tok, tokens_out=output_tok)
+            try:
+                act = self._parse_result(raw, state, input_tok, output_tok)
+                trace.step(f"parse: {act.act_type}")
+                trace.output({"act_type": act.act_type})
+                return act
+            except json.JSONDecodeError:
+                trace.step("parse failed — retrying with correction prompt")
+                fix_user = (
+                    f"Your previous response was not valid JSON. Here is what you returned:\n\n"
+                    f"{raw}\n\n"
+                    f"Return ONLY the corrected JSON object. No prose, no markdown fences, no other text."
+                )
+                raw2, i2, o2 = self._call_provider(system, fix_user)
+                trace.model(operation="completion", target=self.model, tokens_in=i2, tokens_out=o2)
+                act2 = self._parse_result(raw2, state, input_tok + i2, output_tok + o2)
+                trace.step(f"parse retry: {act2.act_type}")
+                trace.output({"act_type": act2.act_type})
+                return act2
 
     # ------------------------------------------------------------------
     # Subclass contract
@@ -198,148 +228,36 @@ class BaseAgent:
         )
 
     # ------------------------------------------------------------------
-    # LLM calls with retry + exponential backoff
+    # Provider dispatch — all LLM calls go through here
     # ------------------------------------------------------------------
 
-    def _call_anthropic(self, system: str, user: str) -> tuple[str, int, int]:
-        """Call Anthropic Messages API. Retries on rate-limit and overload (runs in thread pool)."""
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        last_exc: Exception | None = None
+    def _resolve_endpoint_type(self) -> str:
+        """Look up endpoint_type for this model from the provider_models DB.
 
-        for attempt in range(_MAX_ATTEMPTS):
-            try:
-                kwargs: dict = {
-                    "model": self.model,
-                    "max_tokens": 2048,
-                    "system": system,
-                    "messages": [{"role": "user", "content": user}],
-                }
-                if not self._temperature_deprecated:
-                    kwargs["temperature"] = self.temperature
+        Falls back to 'default' if the DB is empty or the model isn't listed yet
+        (e.g. first run before any key has been tested).
+        """
+        try:
+            from core.runs_db import connect as _db_connect
+            conn = _db_connect()
+            row = conn.execute(
+                "SELECT endpoint_type FROM provider_models WHERE provider=? AND model_id=?",
+                (self._provider, self.model),
+            ).fetchone()
+            conn.close()
+            return (row["endpoint_type"] or "default") if row else "default"
+        except Exception:
+            return "default"
 
-                response = client.messages.create(**kwargs)
-                text = next(b.text for b in response.content if b.type == "text")
-                return text, response.usage.input_tokens, response.usage.output_tokens
-
-            except anthropic.BadRequestError as e:
-                msg = str(e).lower()
-                if "credit" in msg or "balance" in msg or "quota" in msg:
-                    raise QuotaExhaustedError("anthropic", str(e))
-                if "temperature" in msg and not self._temperature_deprecated:
-                    self._temperature_deprecated = True
-                    last_exc = e
-                    continue  # retry immediately without temperature
-                raise
-
-            except anthropic.PermissionDeniedError as e:
-                msg = str(e).lower()
-                if "credit" in msg or "balance" in msg or "quota" in msg:
-                    raise QuotaExhaustedError("anthropic", str(e))
-                raise
-
-            except anthropic.RateLimitError as e:
-                last_exc = e
-                if attempt < _MAX_ATTEMPTS - 1:
-                    time.sleep(_BACKOFF_BASE * (2 ** attempt))
-
-            except anthropic.APIStatusError as e:
-                if e.status_code in (529, 500, 502, 503) and attempt < _MAX_ATTEMPTS - 1:
-                    last_exc = e
-                    time.sleep(_BACKOFF_BASE * (2 ** attempt))
-                else:
-                    raise
-
-        assert last_exc is not None
-        raise last_exc
-
-    def _call_openai(self, system: str, user: str) -> tuple[str, int, int]:
-        """Call OpenAI Chat Completions API. Retries on rate-limit and server errors."""
-        from openai import OpenAI, RateLimitError, APIStatusError
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        last_exc: Exception | None = None
-
-        for attempt in range(_MAX_ATTEMPTS):
-            try:
-                kwargs: dict = {
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                }
-                if not self._temperature_deprecated:
-                    kwargs["temperature"] = self.temperature
-
-                response = client.chat.completions.create(**kwargs)
-                content = response.choices[0].message.content
-                usage = response.usage
-                return content, usage.prompt_tokens, usage.completion_tokens
-
-            except RateLimitError as e:
-                if "insufficient_quota" in str(e).lower():
-                    raise QuotaExhaustedError("openai", str(e))
-                last_exc = e
-                if attempt < _MAX_ATTEMPTS - 1:
-                    time.sleep(_BACKOFF_BASE * (2 ** attempt))
-
-            except APIStatusError as e:
-                if e.status_code == 400 and "temperature" in str(e).lower() and not self._temperature_deprecated:
-                    self._temperature_deprecated = True
-                    last_exc = e
-                    continue  # retry immediately without temperature
-                if e.status_code in (500, 502, 503) and attempt < _MAX_ATTEMPTS - 1:
-                    last_exc = e
-                    time.sleep(_BACKOFF_BASE * (2 ** attempt))
-                else:
-                    raise
-
-        assert last_exc is not None
-        raise last_exc
-
-    def _call_google(self, system: str, user: str) -> tuple[str, int, int]:
-        """Call Google Gemini API via google-genai SDK. Retries on rate-limit and server errors."""
-        from google import genai
-        from google.genai import types
-        from google.genai import errors as gerrors
-
-        client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
-        last_exc: Exception | None = None
-
-        for attempt in range(_MAX_ATTEMPTS):
-            try:
-                response = client.models.generate_content(
-                    model=self.model,
-                    contents=user,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system or None,
-                        temperature=self.temperature,
-                        max_output_tokens=2048,
-                    ),
-                )
-                text = response.text
-                usage = response.usage_metadata
-                return text, usage.prompt_token_count or 0, usage.candidates_token_count or 0
-
-            except gerrors.ClientError as e:
-                msg = str(e).lower()
-                status = getattr(e, "status", None)
-                if any(k in msg for k in ("billing", "quota", "exhausted", "exceeded")):
-                    raise QuotaExhaustedError("google", str(e))
-                # Transient 429 → retry; other 4xx → raise immediately.
-                if status == 429:
-                    last_exc = e
-                    if attempt < _MAX_ATTEMPTS - 1:
-                        time.sleep(_BACKOFF_BASE * (2 ** attempt))
-                else:
-                    raise
-
-            except gerrors.ServerError as e:
-                last_exc = e
-                if attempt < _MAX_ATTEMPTS - 1:
-                    time.sleep(_BACKOFF_BASE * (2 ** attempt))
-                else:
-                    raise
-
-        assert last_exc is not None
-        raise last_exc
+    def _call_provider(self, system: str, user: str) -> tuple[str, int, int]:
+        """Route inference to the correct provider adapter via the central router."""
+        from providers import generate as _router_generate
+        key_env = _KEY_ENV_MAP.get(self._provider)
+        if not key_env:
+            raise ValueError(f"No key env mapping for provider '{self._provider}'")
+        key = os.environ[key_env]
+        return _router_generate(
+            self._provider, key, self.model, self._endpoint_type,
+            system, user, self.temperature,
+            enable_web_search=True,
+        )

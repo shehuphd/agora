@@ -8,11 +8,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from traceact import ActionTrace
 from core.config import DebateRunConfig
 from core.state import DialogueState, TokenUsage, apply_act, legal_acts_for
 from core.grammar import validate_act
 from core.termination import check_termination
 from core.checkpoint import init_db, checkpoint
+from core import runs_db as _runs_db
 from agents.proposition import PropositionAgent
 from agents.opposition import OppositionAgent
 from agents.moderator import ModeratorAgent
@@ -51,8 +53,41 @@ async def run_debate(
     initial_state: "DialogueState | None" = None,
     turn_idx_start: int = 0,
     continued_from: str | None = None,
+    experiment_name: str | None = None,
 ):
     """Entry point: initialise DB + state, build agents, run orchestrator."""
+    with ActionTrace.start(
+        action="debate.run",
+        kind="app",
+        actor="user",
+        project="agora",
+        correlation_id=run_id,
+    ) as debate_trace:
+        debate_trace.input({
+            "run_id": run_id,
+            "topic": config.topic,
+            "proposition_model": config.proposition.model,
+            "opposition_model": config.opposition.model,
+            "moderator_model": config.moderator.model,
+            "synthesiser_model": config.synthesiser.model,
+            "max_turns": config.protocol.max_turns,
+            "token_budget": config.protocol.token_budget,
+        })
+        await _run_debate_inner(
+            run_id=run_id, config=config, run_dir=run_dir,
+            event_queue=event_queue, pause_event=pause_event,
+            overrides=overrides, force_close_event=force_close_event,
+            initial_state=initial_state, turn_idx_start=turn_idx_start,
+            continued_from=continued_from, experiment_name=experiment_name,
+            debate_trace=debate_trace,
+        )
+
+
+async def _run_debate_inner(
+    run_id, config, run_dir, event_queue, pause_event, overrides,
+    force_close_event, initial_state, turn_idx_start, continued_from,
+    experiment_name, debate_trace,
+):
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(config.to_json())
     db_path = run_dir / "debate.db"
@@ -60,6 +95,43 @@ async def run_debate(
     init_db(conn)
 
     now = datetime.utcnow().isoformat()
+
+    # Write to the runs index — do this early so the run appears in history immediately.
+    try:
+        idx = _runs_db.connect()
+        _runs_db.init(idx)
+        _runs_db.insert_run(
+            idx,
+            run_id=run_id,
+            run_dir=run_dir.name,
+            created_at=now,
+            debate_title=config.debate_title or "",
+            topic=config.topic,
+            steelman_mode=config.steelman_mode,
+            proposition_nickname=config.proposition.nickname,
+            opposition_nickname=config.opposition.nickname,
+            continued_from=continued_from,
+            config_json=config.to_json(),
+        )
+        idx.close()
+    except Exception as exc:
+        print(f"[runs_db] insert_run failed: {exc}", flush=True)
+
+    if experiment_name:
+        try:
+            import uuid as _uuid
+            eidx = _runs_db.connect()
+            _runs_db.init(eidx)
+            exp = _runs_db.find_experiment_by_name(eidx, experiment_name)
+            if exp is None:
+                eid = str(_uuid.uuid4())
+                _runs_db.create_experiment(eidx, experiment_id=eid, name=experiment_name, description=None, created_at=now)
+            else:
+                eid = exp["experiment_id"]
+            _runs_db.assign_run(eidx, run_id, eid)
+            eidx.close()
+        except Exception as exc:
+            print(f"[runs_db] experiment assign failed: {exc}", flush=True)
 
     if initial_state is not None:
         # Continuation: reuse historical state with a fresh run identity.
@@ -146,7 +218,11 @@ async def run_debate(
         token_budget=config.protocol.token_budget,
         config={},
     )
-    synthesiser = SynthesiserAgent(config={})
+    synthesiser = SynthesiserAgent(
+        model=config.synthesiser.model,
+        temperature=config.synthesiser.temperature,
+        config={},
+    )
 
     # Default no-op pause_event (always "running") when not supplied
     if pause_event is None:
@@ -169,6 +245,11 @@ async def run_debate(
         continued_from=continued_from,
     )
     await orchestrator.run()
+    debate_trace.output({
+        "closure_reason": state.closure_reason,
+        "turns": state.turn,
+        "total_tokens": sum(u.input_tokens + u.output_tokens for u in state.token_usage.values()),
+    })
 
 
 class TurnOrchestrator:
@@ -248,98 +329,144 @@ class TurnOrchestrator:
                 agent = self.agents[turn_idx % 2]
                 self.state.next_agent = agent.role
 
-                await self.event_queue.put({"type": "thinking", "agent": agent.nickname, "role": agent.role})
-                try:
-                    act = await self._call(agent.generate, self.state)
-                    validate_act(self.state, act.act_type)
-                except asyncio.TimeoutError:
-                    await self.event_queue.put({
-                        "type": "error",
-                        "message": "Agent timed out (90 s) — the AI provider may be overloaded. Try again.",
+                with ActionTrace.start(
+                    action="debate.turn",
+                    kind="app",
+                    actor="orchestrator",
+                    project="agora",
+                    correlation_id=self.state.run_id,
+                    meta={"turn": self.state.turn, "agent_role": agent.role},
+                ) as turn_trace:
+                    turn_trace.input({
+                        "turn": self.state.turn,
+                        "agent": agent.nickname,
+                        "agent_role": agent.role,
                     })
-                    break
-                except QuotaExhaustedError as e:
-                    _write_quota_warning(e.provider)
-                    self.state.closure_reason = f"quota_exhausted_{e.provider}"
-                    await self.event_queue.put({"type": "error", "message": _friendly_quota_error(e.provider)})
-                    break
-                except Exception as e:
-                    await self.event_queue.put({"type": "error", "message": _friendly_error(e)})
-                    break
 
-                apply_act(self.state, act)
-                checkpoint(self.conn, self.state, act, self.run_dir)
-                await self.event_queue.put(_act_to_dict(act))
-                await asyncio.sleep(0.7)
-
-                # Build effective termination config (may differ from original if budget overridden)
-                term_cfg = self.config.to_termination_dict()
-                term_cfg["protocol"]["token_budget"] = self._effective_token_budget()
-                should_close, closure_reason = check_termination(self.state, term_cfg)
-
-                # User clicked "end debate" — override termination regardless of turn count.
-                if self._force_close_event.is_set():
-                    should_close   = True
-                    closure_reason = "user_requested_end"
-
-                # Sync moderator's displayed budget to the current effective value.
-                # The attribute is _token_budget (private) — must use the correct name.
-                self.moderator._token_budget = self._effective_token_budget()
-
-                await self.event_queue.put({"type": "thinking", "agent": "Moderator", "role": "moderator"})
-                try:
-                    mod_fn = functools.partial(
-                        self.moderator.generate, self.state,
-                        should_close=should_close, closure_reason=closure_reason,
-                    )
-                    mod_act = await self._call(mod_fn)
-                    apply_act(self.state, mod_act)
-                    checkpoint(self.conn, self.state, mod_act, self.run_dir)
-                    await self.event_queue.put(_act_to_dict(mod_act))
-                    await asyncio.sleep(0.7)
-                    # Honour a CLOSE the moderator generated on its own judgement,
-                    # even if check_termination didn't instruct it to close.
-                    if mod_act.act_type == "CLOSE":
-                        should_close = True
-                except QuotaExhaustedError as e:
-                    _write_quota_warning(e.provider)
-                    print(f"[runner] MODERATOR QUOTA ERROR: {e}", flush=True)
-                    await self.event_queue.put({
-                        "type": "error",
-                        "message": f"Moderator: {_friendly_quota_error(e.provider)}",
-                    })
-                    should_close = True
-                    if not self.state.closure_reason:
-                        self.state.closure_reason = f"quota_exhausted_{e.provider}"
-                except Exception as e:
-                    print(f"[runner] MODERATOR ERROR: {e}\n{traceback.format_exc()}", flush=True)
-                    await self.event_queue.put({
-                        "type": "error",
-                        "message": f"Moderator: {_friendly_error(e)}",
-                    })
-                    should_close = True
-                    if not self.state.closure_reason:
-                        self.state.closure_reason = "moderator_error"
-
-                if should_close:
-                    await self.event_queue.put({"type": "thinking", "agent": "Synthesis", "role": "synthesiser"})
+                    await self.event_queue.put({"type": "thinking", "agent": agent.nickname, "role": agent.role})
+                    act = None
                     try:
-                        synth_act = await self._call(self.synthesiser.generate, self.state)
-                        apply_act(self.state, synth_act)
-                        checkpoint(self.conn, self.state, synth_act, self.run_dir)
-                        await self.event_queue.put(_act_to_dict(synth_act))
+                        act = await self._call(agent.generate, self.state)
+                        validate_act(self.state, act.act_type)
+                    except asyncio.TimeoutError:
+                        turn_trace.step(f"timeout: {agent.role} after 90s")
+                        turn_trace.output({"error": "timeout", "agent_role": agent.role})
+                        await self.event_queue.put({
+                            "type": "error",
+                            "message": "Agent timed out (90 s) — the AI provider may be overloaded. Try again.",
+                        })
+                        break
                     except QuotaExhaustedError as e:
+                        turn_trace.step(f"quota_exhausted: {e.provider}")
+                        turn_trace.output({"error": "quota_exhausted", "provider": e.provider})
                         _write_quota_warning(e.provider)
-                        await self.event_queue.put({
-                            "type": "error",
-                            "message": f"Synthesiser: {_friendly_quota_error(e.provider)}",
-                        })
+                        self.state.closure_reason = f"quota_exhausted_{e.provider}"
+                        await self.event_queue.put({"type": "error", "message": _friendly_quota_error(e.provider)})
+                        break
                     except Exception as e:
+                        turn_trace.step(f"agent_error: {type(e).__name__}")
+                        turn_trace.output({"error": str(e), "agent_role": agent.role})
+                        print(f"[runner] {agent.role.upper()} ERROR ({agent.model}): {e}\n{traceback.format_exc()}", flush=True)
+                        label = f"{agent.role} ({agent.model}): "
+                        await self.event_queue.put({"type": "error", "message": label + _friendly_error(e)})
+                        break
+
+                    turn_trace.step(f"agent: {act.act_type}")
+                    apply_act(self.state, act)
+                    checkpoint(self.conn, self.state, act, self.run_dir)
+                    await self.event_queue.put(_act_to_dict(act))
+                    await asyncio.sleep(0.7)
+
+                    # Build effective termination config (may differ from original if budget overridden)
+                    term_cfg = self.config.to_termination_dict()
+                    term_cfg["protocol"]["token_budget"] = self._effective_token_budget()
+                    should_close, closure_reason = check_termination(self.state, term_cfg)
+
+                    # User clicked "end debate" — override termination regardless of turn count.
+                    if self._force_close_event.is_set():
+                        should_close   = True
+                        closure_reason = "user_requested_end"
+
+                    if should_close:
+                        turn_trace.step(f"termination: {closure_reason}")
+
+                    # Sync moderator's displayed budget to the current effective value.
+                    # The attribute is _token_budget (private) — must use the correct name.
+                    self.moderator._token_budget = self._effective_token_budget()
+
+                    await self.event_queue.put({"type": "thinking", "agent": "Moderator", "role": "moderator"})
+                    mod_act = None
+                    try:
+                        mod_fn = functools.partial(
+                            self.moderator.generate, self.state,
+                            should_close=should_close, closure_reason=closure_reason,
+                        )
+                        mod_act = await self._call(mod_fn)
+                        apply_act(self.state, mod_act)
+                        checkpoint(self.conn, self.state, mod_act, self.run_dir)
+                        await self.event_queue.put(_act_to_dict(mod_act))
+                        await asyncio.sleep(0.7)
+                        # Honour a CLOSE the moderator generated on its own judgement,
+                        # even if check_termination didn't instruct it to close.
+                        if mod_act.act_type == "CLOSE":
+                            should_close = True
+                        turn_trace.step(f"moderator: {mod_act.act_type}")
+                    except QuotaExhaustedError as e:
+                        turn_trace.step(f"moderator_quota_exhausted: {e.provider}")
+                        _write_quota_warning(e.provider)
+                        print(f"[runner] MODERATOR QUOTA ERROR: {e}", flush=True)
                         await self.event_queue.put({
                             "type": "error",
-                            "message": f"Synthesiser: {_friendly_error(e)}",
+                            "message": f"Moderator: {_friendly_quota_error(e.provider)}",
                         })
-                    break
+                        should_close = True
+                        if not self.state.closure_reason:
+                            self.state.closure_reason = f"quota_exhausted_{e.provider}"
+                    except Exception as e:
+                        turn_trace.step(f"moderator_error: {type(e).__name__}")
+                        print(f"[runner] MODERATOR ERROR: {e}\n{traceback.format_exc()}", flush=True)
+                        await self.event_queue.put({
+                            "type": "error",
+                            "message": f"moderator ({self.moderator.model}): {_friendly_error(e)}",
+                        })
+                        should_close = True
+                        if not self.state.closure_reason:
+                            self.state.closure_reason = "moderator_error"
+
+                    if should_close:
+                        await self.event_queue.put({"type": "thinking", "agent": "Synthesis", "role": "synthesiser"})
+                        try:
+                            synth_act = await self._call(self.synthesiser.generate, self.state)
+                            apply_act(self.state, synth_act)
+                            checkpoint(self.conn, self.state, synth_act, self.run_dir)
+                            await self.event_queue.put(_act_to_dict(synth_act))
+                            turn_trace.step(f"synthesiser: {synth_act.act_type}")
+                        except QuotaExhaustedError as e:
+                            turn_trace.step(f"synthesiser_quota_exhausted: {e.provider}")
+                            _write_quota_warning(e.provider)
+                            await self.event_queue.put({
+                                "type": "error",
+                                "message": f"Synthesiser: {_friendly_quota_error(e.provider)}",
+                            })
+                        except Exception as e:
+                            turn_trace.step(f"synthesiser_error: {type(e).__name__}")
+                            await self.event_queue.put({
+                                "type": "error",
+                                "message": f"synthesiser ({self.synthesiser.model}): {_friendly_error(e)}",
+                            })
+                        turn_trace.output({
+                            "agent_act": act.act_type if act else None,
+                            "mod_act": mod_act.act_type if mod_act else None,
+                            "closed": True,
+                            "closure_reason": closure_reason or self.state.closure_reason,
+                        })
+                        break
+
+                    turn_trace.output({
+                        "agent_act": act.act_type,
+                        "mod_act": mod_act.act_type if mod_act else None,
+                        "closed": False,
+                    })
 
                 turn_idx += 1
 
@@ -354,6 +481,25 @@ class TurnOrchestrator:
                 self.conn.close()
             except Exception:
                 pass
+            # Update the runs index with final status + counts.
+            try:
+                final_tokens = sum(
+                    u.input_tokens + u.output_tokens
+                    for u in self.state.token_usage.values()
+                )
+                idx = _runs_db.connect()
+                _runs_db.update_on_close(
+                    idx,
+                    run_id=self.state.run_id,
+                    status=status,
+                    closure_reason=self.state.closure_reason,
+                    debate_title=self.state.debate_title or "",
+                    turn=self.state.turn,
+                    total_tokens=final_tokens,
+                )
+                idx.close()
+            except Exception as exc:
+                print(f"[runs_db] update_on_close failed: {exc}", flush=True)
             await self.event_queue.put(None)
 
     async def _call(self, fn: Any, *args: Any) -> Any:
@@ -393,8 +539,14 @@ def _friendly_error(e: Exception) -> str:
     low = msg.lower()
     if "rate_limit" in low or "rate limit" in low or "429" in msg:
         return "Rate limit reached — wait a moment and try again, or check your API subscription."
-    if "auth" in low or "401" in low or "invalid_api_key" in low or "incorrect api key" in low:
+    if "insufficient_permission" in low or "insufficient permissions" in low:
+        return "Insufficient permissions for this model — your API key or plan may not have inference access to it, even if it appears in the model list. Try a different model or check your OpenAI project permissions."
+    if "model_not_found" in low:
+        return "Model not found — the selected model doesn't exist. Pick a different model in Settings."
+    if "invalid_api_key" in low or "incorrect api key" in low or "api key" in low:
         return "Invalid API key — check your key in Settings."
+    if "auth" in low or "401" in msg:
+        return "Authentication failed — check your API key in Settings."
     if "context_length" in low or "context length" in low or "too many tokens" in low:
         return "Context length exceeded — reduce the token budget or turn count and try again."
     if "overloaded" in low or "529" in msg:

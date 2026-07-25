@@ -4,35 +4,40 @@ from typing import Optional
 
 
 class PropositionAgentConfig(BaseModel):
-    """Config for the proposition (asserting) agent."""
-    model: str = "claude-sonnet-4-6"
+    model: Optional[str] = None
     temperature: float = 0.7
     max_claims: int = 5
 
 
 class OppositionAgentConfig(BaseModel):
-    """Config for the opposition (challenging) agent."""
-    model: str = "gpt-4o"
+    model: Optional[str] = None
     temperature: float = 0.4
     aggression: float = 0.8
 
 
 class ModeratorAgentConfig(BaseModel):
-    """Config for the moderator agent — low temperature for determinism."""
-    model: str = "claude-opus-4-8"
+    model: Optional[str] = None
     temperature: float = 0.3
     auto_generate_title: bool = True
 
 
+class SynthesiserAgentConfig(BaseModel):
+    model: Optional[str] = None
+    temperature: float = 0.3
+
+
 class AgentsConfig(BaseModel):
-    """Nested config block for all three active agent roles."""
     proposition: PropositionAgentConfig = PropositionAgentConfig()
     opposition: OppositionAgentConfig = OppositionAgentConfig()
     moderator: ModeratorAgentConfig = ModeratorAgentConfig()
+    synthesiser: SynthesiserAgentConfig = SynthesiserAgentConfig()
+
+
+class OpenAIConfig(BaseModel):
+    responses_mode: str = "auto"
 
 
 class ProtocolConfig(BaseModel):
-    """Governs termination conditions and debate length limits."""
     min_challenges: int = 2
     min_concessions: int = 1
     max_turns: int = 8
@@ -43,14 +48,18 @@ class ProtocolConfig(BaseModel):
 
 
 class OutputConfig(BaseModel):
-    """Controls what artefacts are written after a debate closes."""
     generate_markdown: bool = True
     store_argument_trace: bool = True
     score_final_output: bool = True
 
 
+class ProvidersConfig(BaseModel):
+    model_order: list[str] = ["openai", "anthropic", "google", "perplexity"]
+
+
 class AgoraConfig(BaseModel):
-    """Root Pydantic model for the complete defaults.yaml configuration file."""
     protocol: ProtocolConfig = ProtocolConfig()
     agents: AgentsConfig = AgentsConfig()
     output: OutputConfig = OutputConfig()
+    openai: OpenAIConfig = OpenAIConfig()
+    providers: ProvidersConfig = ProvidersConfig()

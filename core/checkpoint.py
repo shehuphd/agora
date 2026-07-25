@@ -340,7 +340,7 @@ def load_state(conn: sqlite3.Connection, run_id: str) -> DialogueState:
     else:
         next_agent = "proposition"
 
-    return DialogueState(
+    state = DialogueState(
         run_id=run_row[0],
         turn=len(acts),
         phase=phase,
@@ -358,3 +358,6 @@ def load_state(conn: sqlite3.Connection, run_id: str) -> DialogueState:
         closure_reason=run_row[5],
         steelman_mode=steelman_mode,
     )
+    from core.state import legal_acts_for
+    state.legal_acts = legal_acts_for(state)
+    return state

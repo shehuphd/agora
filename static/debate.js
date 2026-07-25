@@ -2,7 +2,7 @@
 
 import {
   esc, formatTokens, triggerDownload,
-  appendActBubble, appendIntroBubble, appendErrorBubble, appendSystemBubble,
+  appendActBubble, appendIntroBubble, appendErrorBubble, appendSystemBubble, appendModelWarningBubble,
   showThinkingBubble, removeThinkingBubble, markDebateClosed,
   renderTokenStrip, updateTerminationTracker,
 } from './render.js';
@@ -30,11 +30,21 @@ function _isResumable(status, closureReason) {
   return !_NON_RESUMABLE.some(kw => cr.includes(kw));
 }
 
+function _badModelsForContinue(cfg) {
+  const known = window._knownModels;
+  if (!known) return [];
+  return [
+    { role: 'proposition', model: cfg.proposition_model },
+    { role: 'opposition',  model: cfg.opposition_model  },
+    { role: 'moderator',   model: cfg.moderator_model   },
+  ].filter(r => r.model && !known.has(r.model));
+}
+
 function _showContinueButton(runId) {
   const btn = document.getElementById('btn-continue');
   if (!btn) return;
 
-  btn.style.display = 'inline-flex';
+  btn.style.display = 'flex';
   btn.disabled      = false;
   btn.innerHTML = '<i class="ti ti-player-play" aria-hidden="true"></i> continue';
 
@@ -86,7 +96,7 @@ export async function loadDebate(runId) {
   const endBtn = document.getElementById('btn-end');
   if (endBtn) {
     endBtn.disabled  = false;
-    endBtn.innerHTML = '<i class="ti ti-x" aria-hidden="true"></i> end';
+    endBtn.innerHTML = '<i class="ti ti-x" aria-hidden="true"></i><span class="dsb-btn-label">end debate</span>';
   }
 
   const rerunBtn = document.getElementById('btn-rerun');
@@ -125,7 +135,7 @@ export async function loadDebate(runId) {
         _tokOffset = { ...data.token_offset };
         debateTok  = { ...data.token_offset };
       }
-      _renderDebateChips(debateCfg);
+      _renderDebateChips(debateCfg, data.experiment_name);
       if (debateCfg.max_turns) {
         const tv = document.getElementById('term-turns-val');
         if (tv) tv.textContent = `0 / ${debateCfg.max_turns}`;
@@ -142,14 +152,21 @@ export async function loadDebate(runId) {
       if (ocEl) ocEl.textContent = _overrideCount;
       renderTokenStrip(debateTok, _effectiveBudget);
       _wireRerunButton(debateCfg);
+      const _bad = _badModelsForContinue(debateCfg);
+      const _offerContinue = () => {
+        if (data.is_continuable) {
+          if (_bad.length) appendModelWarningBubble(_bad);
+          else _showContinueButton(runId);
+        }
+      };
       if (data.status === 'closed' || data.status === 'error') {
         markDebateClosed();
-        if (data.is_continuable) _showContinueButton(runId);
+        _offerContinue();
         return;
       }
       if (data.status === 'running') {
         // Stuck running means server restarted — server will confirm continuability.
-        if (data.is_continuable) _showContinueButton(runId);
+        _offerContinue();
       }
     }
   } catch (e) { console.warn('debate state load failed', e); }
@@ -161,6 +178,24 @@ function _wireRerunButton(cfg) {
   const btn = document.getElementById('btn-rerun');
   if (!btn) return;
   btn.onclick = () => {
+    // Validate that every model used in this run is still available in the DB.
+    // The stored config is authoritative — no fallback model names are hardcoded here.
+    const known = window._knownModels || new Set();
+    const stale = [
+      ['Proposition', cfg.proposition_model],
+      ['Opposition',  cfg.opposition_model],
+      ['Moderator',   cfg.moderator_model],
+    ].filter(([, m]) => m && !known.has(m));
+
+    if (stale.length) {
+      const list = stale.map(([role, m]) => `${role}: ${m}`).join(', ');
+      appendSystemBubble(
+        'ti-alert-triangle',
+        `Cannot rerun — ${stale.length === 1 ? 'this model is' : 'these models are'} no longer available: ${list}. Start a new debate and choose current models instead.`,
+      );
+      return;
+    }
+
     // Build pendingDebate directly from the stored DB config so no form round-trip
     // is needed. This avoids the slider scale mismatches (_prefillNewForm passed raw
     // float temperatures and raw token counts to integer sliders, causing wrong values)
@@ -168,9 +203,9 @@ function _wireRerunButton(cfg) {
     const pending = {
       topic:                   cfg.topic                  || '',
       debate_title:            '',
-      prop_model:              cfg.proposition_model      || 'claude-sonnet-4-6',
-      opp_model:               cfg.opposition_model       || 'gpt-4o',
-      mod_model:               cfg.moderator_model        || 'claude-opus-4-8',
+      prop_model:              cfg.proposition_model,
+      opp_model:               cfg.opposition_model,
+      mod_model:               cfg.moderator_model,
       prop_nickname:           cfg.proposition_nickname   || 'Thesis',
       opp_nickname:            cfg.opposition_nickname    || 'Antithesis',
       mod_nickname:            'Moderator',
@@ -331,16 +366,19 @@ function _accumulateTokens(act) {
 function _setPauseButtonState(paused) {
   const btn = document.getElementById('btn-pause');
   if (!btn) return;
-  const icon = btn.querySelector('i');
+  const icon  = btn.querySelector('i');
+  const label = btn.querySelector('.dsb-btn-label');
   if (paused) {
     btn.setAttribute('aria-label', 'resume debate');
-    btn.title = 'resume';
-    if (icon) { icon.className = 'ti ti-player-play'; }
-    btn.classList.add('btn-paused');
+    if (icon)  icon.className = 'ti ti-player-play';
+    if (label) label.textContent = 'resume';
+    btn.classList.add('dsb-paused');
+    btn.classList.remove('btn-paused');
   } else {
     btn.setAttribute('aria-label', 'pause debate');
-    btn.title = 'pause';
-    if (icon) { icon.className = 'ti ti-player-pause'; }
+    if (icon)  icon.className = 'ti ti-player-pause';
+    if (label) label.textContent = 'pause';
+    btn.classList.remove('dsb-paused');
     btn.classList.remove('btn-paused');
   }
 }
@@ -368,18 +406,18 @@ function _wireEndButton(runId) {
     if (!_pendingConfirm) {
       // First click — ask for confirmation.
       _pendingConfirm = true;
-      btn.innerHTML = '<i class="ti ti-alert-triangle" aria-hidden="true"></i> confirm end?';
+      btn.innerHTML = '<i class="ti ti-alert-triangle" aria-hidden="true"></i><span class="dsb-btn-label">confirm end?</span>';
       // Auto-cancel after 5 s if no second click.
       _confirmTimer = setTimeout(() => {
         _pendingConfirm = false;
-        btn.innerHTML = '<i class="ti ti-x" aria-hidden="true"></i> end';
+        btn.innerHTML = '<i class="ti ti-x" aria-hidden="true"></i><span class="dsb-btn-label">end debate</span>';
       }, 5000);
     } else {
       // Second click — proceed.
       clearTimeout(_confirmTimer);
       _pendingConfirm = false;
       btn.disabled = true;
-      btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i> ending…';
+      btn.innerHTML = '<i class="ti ti-loader-2" aria-hidden="true"></i><span class="dsb-btn-label">ending…</span>';
       try {
         await fetch(`/debates/${runId}/end`, { method: 'POST' });
         // The runner will finish the current turn, call the moderator with
@@ -439,7 +477,7 @@ function _wireOverridePanel(runId) {
   }
 }
 
-function _renderDebateChips(cfg) {
+function _renderDebateChips(cfg, experimentName) {
   const container = document.getElementById('dh-chips');
   if (!container) return;
   container.innerHTML = '';
@@ -464,4 +502,5 @@ function _renderDebateChips(cfg) {
   const budget = cfg.token_budget;
   if (budget) container.appendChild(chip(`${Math.round(budget / 1000)}k tokens`));
   if (cfg.min_challenges) container.appendChild(chip(`min ${cfg.min_challenges} challenges`));
+  if (experimentName) container.appendChild(chip(`experiment: ${experimentName}`, false));
 }

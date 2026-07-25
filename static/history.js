@@ -140,13 +140,14 @@ export async function loadHistory(offset = 0) {
       sortedDebates().forEach(d => {
         const statusCls = d.status === 'running' ? 'pill-live' : d.status === 'paused' ? 'pill-paused' : 'pill-done';
         const modeTag   = d.steelman_mode ? '<span class="pill-rapoport">Rapoport</span>' : '';
+        const expTag    = d.experiment_name ? `<span class="pill-exp" title="${esc(d.experiment_id)}">${esc(d.experiment_name)}</span>` : '';
         const row = document.createElement('tr');
         row.innerHTML = `
           <td class="col-check" onclick="event.stopPropagation()">
             <input type="checkbox" class="row-check" data-id="${esc(d.run_id)}"${selected.has(d.run_id) ? ' checked' : ''}>
           </td>
           <td class="cell-id">${esc(d.run_id)}</td>
-          <td class="cell-title">${esc(d.debate_title || d.topic || '—')}</td>
+          <td class="cell-title">${esc(d.debate_title || d.topic || '—')}${expTag}</td>
           <td class="cell-meta">${esc(d.proposition_nickname || 'P')} vs ${esc(d.opposition_nickname || 'O')}</td>
           <td class="cell-meta">${esc(d.turn || 0)}</td>
           <td class="cell-tok">${formatTokens(d.total_tokens || 0)}</td>

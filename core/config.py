@@ -11,7 +11,7 @@ import json
 
 @dataclass(frozen=True)
 class AgentRunConfig:
-    model: str
+    model: str | None
     temperature: float
     nickname: str
     aggression: float = 0.8  # only meaningful for opposition
@@ -34,39 +34,55 @@ class DebateRunConfig:
     proposition: AgentRunConfig
     opposition: AgentRunConfig
     moderator: AgentRunConfig
+    synthesiser: AgentRunConfig = field(default_factory=lambda: AgentRunConfig(
+        model=None, temperature=0.3, nickname="Synthesis"
+    ))
     protocol: ProtocolRunConfig = field(default_factory=ProtocolRunConfig)
     steelman_mode: bool = False
 
     @classmethod
-    def from_api(cls, c: object) -> "DebateRunConfig":
+    def from_api(cls, c: object, first_available: str | None = None) -> "DebateRunConfig":
         """Convert a Pydantic DebateConfig (from api/models.py) to a run config.
 
         The new-debate form sends short-name keys (prop_model, opp_model, etc.)
         while the canonical model fields use long names (proposition_model, etc.).
         Short names take priority when non-None; long-name fields provide defaults.
+        first_available is the first model from the DB — used when no model is specified,
+        so no model name is ever hardcoded here.
         """
         def _pick(short, long, fallback):
             v = getattr(c, short, None)
-            return v if v is not None else getattr(c, long, fallback)
+            if v is not None:
+                v = v.strip() or None if isinstance(v, str) else v
+            if v is None:
+                v = getattr(c, long, None)
+                if v is not None:
+                    v = v.strip() or None if isinstance(v, str) else v
+            return v if v is not None else fallback
 
         return cls(
             topic=c.topic,
             debate_title=getattr(c, "debate_title", None) or f"Debate: {c.topic[:60]}",
             proposition=AgentRunConfig(
-                model=_pick("prop_model",     "proposition_model",     "claude-sonnet-4-6"),
+                model=_pick("prop_model",     "proposition_model",     first_available),
                 temperature=_pick("prop_temperature", "temperature_proposition", 0.7),
                 nickname=_pick("prop_nickname", "proposition_nickname", "Thesis"),
             ),
             opposition=AgentRunConfig(
-                model=_pick("opp_model",     "opposition_model",     "gpt-4o"),
+                model=_pick("opp_model",     "opposition_model",     first_available),
                 temperature=_pick("opp_temperature", "temperature_opposition", 0.4),
                 nickname=_pick("opp_nickname", "opposition_nickname", "Antithesis"),
                 aggression=_pick("opp_aggression", "aggression", 0.8),
             ),
             moderator=AgentRunConfig(
-                model=_pick("mod_model", "moderator_model", "claude-opus-4-8"),
+                model=_pick("mod_model", "moderator_model", first_available),
                 temperature=getattr(c, "temperature_moderator", 0.3),
                 nickname="Moderator",
+            ),
+            synthesiser=AgentRunConfig(
+                model=_pick("synth_model", "synthesiser_model", first_available),
+                temperature=getattr(c, "temperature_synthesiser", 0.3),
+                nickname="Synthesis",
             ),
             protocol=ProtocolRunConfig(
                 max_turns=getattr(c, "max_turns", 8),
@@ -99,20 +115,25 @@ class DebateRunConfig:
             topic=d["topic"],
             debate_title=d.get("debate_title", f"Debate: {d['topic'][:60]}"),
             proposition=AgentRunConfig(
-                model=d.get("proposition_model", "claude-sonnet-4-6"),
+                model=d.get("proposition_model") or None,
                 temperature=d.get("temperature_proposition", 0.7),
                 nickname=d.get("proposition_nickname", "Thesis"),
             ),
             opposition=AgentRunConfig(
-                model=d.get("opposition_model", "gpt-4o"),
+                model=d.get("opposition_model") or None,
                 temperature=d.get("temperature_opposition", 0.4),
                 nickname=d.get("opposition_nickname", "Antithesis"),
                 aggression=d.get("aggression", 0.8),
             ),
             moderator=AgentRunConfig(
-                model=d.get("moderator_model", "claude-opus-4-8"),
+                model=d.get("moderator_model") or None,
                 temperature=d.get("temperature_moderator", 0.3),
                 nickname="Moderator",
+            ),
+            synthesiser=AgentRunConfig(
+                model=d.get("synthesiser_model") or None,
+                temperature=d.get("temperature_synthesiser", 0.3),
+                nickname="Synthesis",
             ),
             protocol=ProtocolRunConfig(
                 max_turns=proto.get("max_turns", 8),
@@ -139,6 +160,8 @@ class DebateRunConfig:
             "aggression": self.opposition.aggression,
             "moderator_model": self.moderator.model,
             "temperature_moderator": self.moderator.temperature,
+            "synthesiser_model": self.synthesiser.model,
+            "temperature_synthesiser": self.synthesiser.temperature,
             "max_turns": self.protocol.max_turns,
             "max_time_minutes": self.protocol.max_time_minutes,
             "token_budget": self.protocol.token_budget,

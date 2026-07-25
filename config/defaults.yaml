@@ -1,20 +1,23 @@
 agent_settings:
   history_window: 6
-ui:
-  history_page_size: 50
 agents:
   moderator:
     auto_generate_title: true
-    model: claude-haiku-4-5
+    model: claude-opus-4-8
     temperature: 0.3
   opposition:
     aggression: 0.8
-    model: claude-opus-4-8
+    model: gemini-3.1-flash-lite
     temperature: 0.4
   proposition:
     max_claims: 5
-    model: claude-sonnet-4-6
+    model: gpt-4.1
     temperature: 0.7
+  synthesiser:
+    model: sonar
+    temperature: 0.3
+openai:
+  responses_mode: auto
 output:
   generate_markdown: true
   score_final_output: true
@@ -22,10 +25,18 @@ output:
 protocol:
   max_steelman_attempts: 2
   max_time_minutes: 15
-  max_turns: 20
+  max_turns: 60
   min_challenges: 5
   min_concessions: 2
   repetition_tolerance: 2
   require_full_resolution: false
   require_steelman: false
-  token_budget: 40000
+  token_budget: 100000
+providers:
+  model_order:
+  - openai
+  - anthropic
+  - google
+  - perplexity
+ui:
+  history_page_size: 50
