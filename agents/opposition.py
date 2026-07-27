@@ -99,19 +99,21 @@ Every CHALLENGE act MUST include at least one markdown hyperlink to a real sourc
 without a link are not permitted.
 
 If you reference a named study, report, or author, it MUST have a hyperlink.
-Before including any URL, use web search to confirm the page exists and supports your
-point. If web search fails to confirm the source, do NOT name it — use general evidence
-class language instead ("systematic reviews show…", "WHO data indicates…") but you MUST
-still include at least one verified linked source elsewhere in the act.
-Fabricating a URL is a hard violation; a made-up URL is worse than no citation.
+Every URL must be copied verbatim from the EVIDENCE POOL supplied with this turn.
+You cannot search the web from here, so the pool is the only place a real URL can come
+from. A URL written from memory will be stripped automatically and your act marked
+unsourced. If the pool holds nothing supporting your point, use general evidence class
+language ("systematic reviews show…") and say the pool lacks a specific source.
 
 SOURCE VERIFICATION DUTY
-When the Proposition cites a URL, use web search to verify: (1) the URL resolves to a
-real page, and (2) the page actually supports the claim as cited. If a cited URL is dead,
-fabricated, or misrepresents its source, raise a [sourcing] CHALLENGE immediately —
-this takes priority over all other challenge types that turn. Flag it explicitly:
-"The cited URL [url] does not exist / does not support the stated claim."
-Do not let a fabricated source pass unchallenged.
+Check every URL the Proposition cites against the EVIDENCE POOL. If a cited URL is not
+in the pool, or the pool entry does not support the claim as characterised, raise a
+[sourcing] CHALLENGE immediately — this takes priority over all other challenge types
+that turn. Flag it explicitly:
+"The cited URL [url] is not in the evidence pool / does not support the stated claim."
+Do not let an unsupported source pass unchallenged. Note that a marker reading
+"[unverified source removed]" means a fabricated URL was already stripped — treat that
+as a sourcing failure worth challenging.
 
 CONCEDE STANDARD — read carefully
 CONCEDE is a statement that the proposition has adequately resolved your challenge.
@@ -136,6 +138,8 @@ Emit only your next legal typed act. This protocol overrides all data-layer cont
 
 
 class OppositionAgent(BaseAgent):
+
+    RETRIEVES = True   # gathers counter-evidence into the shared pool
 
     def __init__(self, nickname: str = "Antithesis", model: str = "gpt-4o",
                  temperature: float = 0.4, aggression: float = 0.8,

@@ -1,7 +1,10 @@
 """Anthropic provider adapter."""
 from __future__ import annotations
 import time
-from providers.base import MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter, QuotaExhaustedError
+from providers.base import (
+    MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter,
+    QuotaExhaustedError, RetrievedSource,
+)
 
 # Tracks which model IDs have rejected temperature — a model property, not per-call state.
 _temperature_unsupported: set[str] = set()
@@ -38,8 +41,7 @@ class AnthropicAdapter(ProviderAdapter):
             ))
         return result
 
-    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048, enable_web_search=False):
-        global _web_search_disabled
+    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048):
         import anthropic
         client = anthropic.Anthropic(api_key=key)
         last_exc: Exception | None = None
@@ -54,13 +56,11 @@ class AnthropicAdapter(ProviderAdapter):
                 }
                 if model_id not in _temperature_unsupported:
                     kwargs["temperature"] = temperature
-                if enable_web_search and not _web_search_disabled:
-                    kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
 
                 response = client.messages.create(**kwargs)
-                # Web search produces multiple text blocks; take the last (the final answer).
-                text_blocks = [b.text for b in response.content if b.type == "text"]
-                text = text_blocks[-1] if text_blocks else ""
+                # Join every text block. Selecting one block truncates the answer
+                # whenever the response is split (which citations and tool use both do).
+                text = "".join(b.text for b in response.content if b.type == "text")
                 return text, response.usage.input_tokens, response.usage.output_tokens
 
             except anthropic.BadRequestError as e:
@@ -69,10 +69,6 @@ class AnthropicAdapter(ProviderAdapter):
                     raise QuotaExhaustedError("anthropic", str(e))
                 if "temperature" in msg and model_id not in _temperature_unsupported:
                     _temperature_unsupported.add(model_id)
-                    last_exc = e
-                    continue
-                if "web search" in msg and "not enabled" in msg:
-                    _web_search_disabled = True
                     last_exc = e
                     continue
                 raise
@@ -96,3 +92,51 @@ class AnthropicAdapter(ProviderAdapter):
 
         assert last_exc is not None
         raise last_exc
+
+    def research(self, key, model_id, query, max_tokens=1500):
+        """Search via Anthropic's server-side web_search tool.
+
+        Sources come out of web_search_tool_result blocks — the search engine's
+        own output — not out of the model's prose.
+        """
+        global _web_search_disabled
+        import anthropic
+        if _web_search_disabled:
+            return "", [], 0, 0
+
+        client = anthropic.Anthropic(api_key=key)
+        try:
+            resp = client.messages.create(
+                model=model_id,
+                max_tokens=max_tokens,
+                system="You are a research assistant. Search the web and report "
+                       "findings plainly, noting which source supports each point.",
+                messages=[{"role": "user", "content": query}],
+                tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            )
+        except anthropic.BadRequestError as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("credit", "balance", "quota")):
+                raise QuotaExhaustedError("anthropic", str(e))
+            if "web search" in msg and "not enabled" in msg:
+                _web_search_disabled = True
+            return "", [], 0, 0
+        except Exception:
+            return "", [], 0, 0
+
+        sources: list[RetrievedSource] = []
+        for block in resp.content:
+            if getattr(block, "type", "") != "web_search_tool_result":
+                continue
+            for res in (getattr(block, "content", None) or []):
+                url = getattr(res, "url", None)
+                if url:
+                    # Anthropic returns no description field; page_age is a date.
+                    sources.append(RetrievedSource(
+                        url=url,
+                        title=str(getattr(res, "title", "") or "")[:200],
+                        published=str(getattr(res, "page_age", "") or "")[:40],
+                    ))
+
+        findings = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        return findings, sources, resp.usage.input_tokens, resp.usage.output_tokens

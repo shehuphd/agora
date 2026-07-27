@@ -17,6 +17,11 @@ _ALLOWED_ACT_TYPES: dict[str, frozenset] = {
     "synthesiser": frozenset({ActType.ARGUMENT_MAP}),
 }
 
+# Matches http/https URLs in agent content for citation extraction.
+# Trailing markdown/sentence punctuation is excluded so links lifted out of
+# "[Name](https://x)." don't carry ")." into the validation request.
+_URL_RE = re.compile(r'https?://[^\s<>\]]+[^\s<>\]).,;:!?\'"]')
+
 # Tags that could confuse section-boundary parsing if injected into debate content.
 _INJECTION_TAG_RE = re.compile(
     r'</?(?:system|instruction|prompt|agora_data|debate_data|user)[^>]{0,80}>',
@@ -33,6 +38,19 @@ def set_history_window(n: int) -> None:
     global _HISTORY_WINDOW
     _HISTORY_WINDOW = max(2, min(10, int(n)))
 
+# Appended to every agent's system prompt. The pool is the only legal source of
+# URLs, which is what makes a fabricated link impossible rather than discouraged.
+_CITATION_CONTRACT = (
+    "CITATION CONTRACT\n"
+    "Every URL you write MUST be copied verbatim from the EVIDENCE POOL supplied "
+    "in this message. You have no other means of knowing whether a URL exists.\n"
+    "Writing a URL that is not in the pool is a protocol violation: it will be "
+    "detected and stripped, and your act will be marked unsourced.\n"
+    "If the pool holds nothing that supports the point you want to make, say so "
+    "plainly and argue from reasoning instead. An honest unsourced argument is "
+    "acceptable; an invented citation is not."
+)
+
 _KEY_ENV_MAP = {
     "anthropic":  "ANTHROPIC_API_KEY",
     "openai":     "OPENAI_API_KEY",
@@ -43,6 +61,10 @@ _KEY_ENV_MAP = {
 
 class BaseAgent:
     """Abstract base for all debate agents. Handles LLM dispatch and Act parsing."""
+
+    # Only the two debating agents search the web. Moderator and Synthesiser read
+    # the pool the debaters filled — they never need their own retrieval.
+    RETRIEVES = False
 
     def __init__(self, role: str, nickname: str, model: str, temperature: float, config: dict):
         self.role = role
@@ -67,15 +89,100 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def generate(self, state: DialogueState) -> Act:
-        """Build prompt, call LLM via the central router, parse response into Act."""
+        """Retrieve (if this agent searches), then compose against the evidence pool.
+
+        Retrieval and composition are deliberately separate calls. Enabling search
+        on the composing call makes the model interleave tool blocks and preamble
+        with its JSON, which breaks parsing — and the repair path then re-prompts
+        without the search results, so the model reconstructs URLs from memory.
+        That is precisely how fabricated links get in.
+        """
+        research_in = research_out = 0
+        if self.RETRIEVES:
+            from core.sources import get_pool
+            research_in, research_out = self._retrieve(state, get_pool(state.run_id))
+
         system, user = self._build_prompt(state)
-        return self._traced_generate(state, system, user)
+        return self._compose_with_pool(
+            state, system, user, extra_in=research_in, extra_out=research_out,
+        )
+
+    def _compose_with_pool(self, state: DialogueState, system: str, user: str,
+                           extra_in: int = 0, extra_out: int = 0) -> Act:
+        """The single chokepoint every citable act must pass through.
+
+        Injects the evidence pool and citation contract, then generates with
+        enforcement attached. Agents that override generate() (e.g. Moderator's
+        extra kwargs) MUST route their call through here — composing via
+        _traced_generate directly would skip pool injection and let a fabricated
+        URL through unchecked.
+        """
+        from core.sources import get_pool
+        pool = get_pool(state.run_id)
+        user = f"{user}\n\n{pool.as_prompt_block()}"
+        system = f"{system}\n\n{_CITATION_CONTRACT}"
+        return self._traced_generate(
+            state, system, user, pool=pool,
+            extra_in=extra_in, extra_out=extra_out,
+        )
+
+    def _retrieve(self, state: DialogueState, pool) -> tuple[int, int]:
+        """Search the web for this turn and pool whatever comes back.
+
+        Returns (input_tokens, output_tokens) so retrieval stays inside the run's
+        token budget. Never raises: a failed search leaves the pool as-is and the
+        agent argues from what is already there.
+        """
+        from core.sources import Source
+        from providers import research as _research
+
+        query = self._research_query(state)
+        if not query:
+            return 0, 0
+        try:
+            key = os.environ[_KEY_ENV_MAP[self._provider]]
+            _findings, sources, in_tok, out_tok = _research(
+                self._provider, key, self.model, query,
+            )
+        except QuotaExhaustedError:
+            raise
+        except Exception as exc:
+            print(f"[sources] retrieval failed ({self.role}): {exc}", flush=True)
+            return 0, 0
+
+        pool.add_many([
+            Source(
+                url=s.url, title=s.title, snippet=s.snippet,
+                published=getattr(s, "published", ""),
+                provider=self._provider, harvested_by=self.role,
+                query=query, turn=state.turn,
+            )
+            for s in sources
+        ])
+        return in_tok, out_tok
+
+    def _research_query(self, state: DialogueState) -> str:
+        """What this agent should go and look up before speaking.
+
+        Includes the opposing debater's most recent act so a CHALLENGE can hunt
+        for counter-evidence. Filtered to the opposing debater specifically —
+        turn order is debater → moderator → debater, so "the last act that isn't
+        mine" is almost always the moderator's STATUS summary, which is the
+        wrong thing to research against.
+        """
+        opponent = "opposition" if self.role == "proposition" else "proposition"
+        parts = [state.topic]
+        recent = [a for a in state.acts if a.agent_role == opponent]
+        if recent:
+            parts.append(f"Specifically address this claim: {recent[-1].content[:400]}")
+        return " ".join(parts)
 
     def _parse_result(self, raw: str, state: DialogueState, input_tok: int, output_tok: int) -> Act:
         """Parse LLM response into Act. Override in subclasses to use a role-specific parser."""
         return self._parse_response(raw, state, input_tok, output_tok)
 
-    def _traced_generate(self, state: DialogueState, system: str, user: str) -> Act:
+    def _traced_generate(self, state: DialogueState, system: str, user: str,
+                         pool=None, extra_in: int = 0, extra_out: int = 0) -> Act:
         """Open a trace, call the provider, parse via _parse_result, retry once on JSON failure."""
         with ActionTrace.start(
             action="agent.generate",
@@ -85,12 +192,19 @@ class BaseAgent:
             correlation_id=state.run_id,
             meta={"model": self.model, "turn": state.turn},
         ) as trace:
+            if extra_in or extra_out:
+                trace.step(f"retrieve: {extra_in}+{extra_out} tokens, pool={len(pool) if pool else 0}")
             raw, input_tok, output_tok = self._call_provider(system, user)
+            # Retrieval is billed to this turn so run token budgets stay honest.
+            input_tok += extra_in
+            output_tok += extra_out
             trace.model(operation="completion", target=self.model, tokens_in=input_tok, tokens_out=output_tok)
             try:
                 act = self._parse_result(raw, state, input_tok, output_tok)
                 trace.step(f"parse: {act.act_type}")
                 trace.output({"act_type": act.act_type})
+                self._enforce_citations(trace, act, pool)
+                self._trace_cite(trace, act)
                 return act
             except json.JSONDecodeError:
                 trace.step("parse failed — retrying with correction prompt")
@@ -104,7 +218,41 @@ class BaseAgent:
                 act2 = self._parse_result(raw2, state, input_tok + i2, output_tok + o2)
                 trace.step(f"parse retry: {act2.act_type}")
                 trace.output({"act_type": act2.act_type})
+                self._enforce_citations(trace, act2, pool)
+                self._trace_cite(trace, act2)
                 return act2
+
+    def _enforce_citations(self, trace, act, pool) -> None:
+        """Strip any URL the agent wrote that no search engine actually returned.
+
+        This is the assertion that closes the loop. Constraining the prompt to the
+        pool makes fabrication unlikely; checking membership afterwards makes it
+        ineffective. HTTP status deliberately plays no part — publishers such as
+        autonomy.work answer 403 to bots, and a live-but-blocked URL is still a
+        real source, while a soft-404 page returns 200 and is not.
+        """
+        if pool is None or not act.content:
+            return
+        in_pool, fabricated = pool.verify_citations(act.content)
+        trace.step(f"cite.check: {len(in_pool)} pooled, {len(fabricated)} fabricated")
+        if not fabricated:
+            return
+
+        cleaned = act.content
+        for url in fabricated:
+            # Collapse "[Label](bad-url)" to "Label [unverified source removed]".
+            cleaned = re.sub(
+                r'\[([^\]]*)\]\(\s*' + re.escape(url) + r'\s*\)',
+                r'\1 [unverified source removed]',
+                cleaned,
+            )
+            cleaned = cleaned.replace(url, "[unverified source removed]")
+        act.content = cleaned
+
+        trace.step(f"cite.fabricated: {', '.join(u[:70] for u in fabricated[:3])}")
+        trace.output({"fabricated_urls": fabricated, "pooled_urls": in_pool})
+        print(f"[sources] stripped {len(fabricated)} fabricated URL(s) from "
+              f"{self.role} turn {act.turn}", flush=True)
 
     # ------------------------------------------------------------------
     # Subclass contract
@@ -117,6 +265,21 @@ class BaseAgent:
     # ------------------------------------------------------------------
     # Shared utilities
     # ------------------------------------------------------------------
+
+    def _trace_cite(self, trace, act) -> None:
+        """Log which URLs the act cites, plus a content preview.
+
+        Observability only — no network calls. Reachability probing used to run
+        here (5 URLs x 3s, inside the agent timeout); pool membership via
+        _enforce_citations has superseded it as the actual guard, and HTTP status
+        was a poor fabrication signal anyway (bot-blocked 403s are real sources,
+        soft-404s return 200).
+        """
+        if not act.content:
+            return
+        urls = _URL_RE.findall(act.content)[:8]
+        trace.step(f"cite.extract: {len(urls)} URL(s) found")
+        trace.output({"urls_found": urls, "content_preview": act.content[:300]})
 
     def _sanitize(self, text: str) -> str:
         """Strip structural tags that could shift section boundaries in the prompt."""
@@ -259,5 +422,4 @@ class BaseAgent:
         return _router_generate(
             self._provider, key, self.model, self._endpoint_type,
             system, user, self.temperature,
-            enable_web_search=True,
         )

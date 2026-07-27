@@ -123,7 +123,9 @@ class ModeratorAgent(BaseAgent):
     def generate(self, state: DialogueState, should_close: bool = False, closure_reason: str = None) -> Act:
         """Generate STATUS or CLOSE act based on current state and termination signal."""
         system, user = self._build_prompt(state, should_close=should_close, closure_reason=closure_reason)
-        return self._traced_generate(state, system, user)
+        # Route through the pool chokepoint so moderator citations are checked
+        # against the shared evidence pool like every other agent's.
+        return self._compose_with_pool(state, system, user)
 
     def _parse_result(self, raw, state, input_tok, output_tok):
         return self._parse_moderator_response(raw, state, input_tok, output_tok)

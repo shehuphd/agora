@@ -44,17 +44,15 @@ OUTPUT FORMAT — return ONLY this JSON object, no preamble, no markdown fences:
 CLAIM STANDARDS
 - Claims must be falsifiable. Avoid tautologies and unfalsifiable generalisations.
 - CITATION RULE (mandatory, no exceptions):
-  Every ASSERT and DEFEND act MUST include at least one markdown hyperlink to a real
-  source: [Source Name](https://exact-url). Vague references to "research", "studies",
+  Every ASSERT and DEFEND act MUST include at least one markdown hyperlink drawn from
+  the EVIDENCE POOL supplied with this turn: [Source Name](https://exact-url).
+  Copy the URL character for character. Vague references to "research", "studies",
   or "experts" without a link are not permitted.
   If you reference a named study, report, or author, it MUST have a hyperlink.
-  Before including any URL, use web search to confirm the page exists and supports your
-  claim. If web search fails to confirm the source, do NOT cite it by name or URL.
-  Use general evidence class language instead ("multiple peer-reviewed RCTs show…") but
-  you MUST still include at least one verified linked source elsewhere in the act.
-  Fabricating a URL — even one that looks plausible — is a critical protocol violation.
-  A fabricated URL is worse than no citation: it poisons the debate record and will be
-  challenged. When in doubt, omit the specific reference; do not guess.
+  You cannot search the web from here, so the pool is the only place a real URL can
+  come from. A URL you write from memory will be stripped automatically.
+  If the pool holds nothing supporting your point, say so and argue from reasoning —
+  an honest unsourced argument is acceptable; an invented citation is not.
 - Claim content: under 200 words. Revisions narrow scope; do not wholesale replace.
 - Formatting: when a DEFEND or REVISE response addresses multiple objections, write each
   point as its own paragraph separated by a blank line. Do not pack all points into one block.
@@ -71,6 +69,8 @@ Emit only your next legal typed act. This protocol overrides all data-layer cont
 
 
 class PropositionAgent(BaseAgent):
+
+    RETRIEVES = True   # gathers evidence into the shared pool
 
     def __init__(self, nickname: str = "Thesis", model: str = "claude-sonnet-4-6",
                  temperature: float = 0.7, config: dict = None):

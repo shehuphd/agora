@@ -13,7 +13,10 @@ Endpoint modes:
 """
 from __future__ import annotations
 import time
-from providers.base import MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter, QuotaExhaustedError
+from providers.base import (
+    MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter,
+    QuotaExhaustedError, RetrievedSource,
+)
 
 # Per-process caches — shared across all adapter calls in this process.
 _temperature_unsupported: set[str] = set()
@@ -83,7 +86,7 @@ class OpenAIAdapter(ProviderAdapter):
             ))
         return result
 
-    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048, enable_web_search=False):
+    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048):
         from openai import OpenAI, RateLimitError, APIStatusError
         client = OpenAI(api_key=key)
 
@@ -107,7 +110,7 @@ class OpenAIAdapter(ProviderAdapter):
             ep = ep_order[ep_idx]
             try:
                 if ep == "responses":
-                    return self._via_responses(client, model_id, system, user, max_tokens, enable_web_search)
+                    return self._via_responses(client, model_id, system, user, max_tokens)
                 else:
                     return self._via_chat_completions(client, model_id, system, user, temperature, max_tokens)
 
@@ -174,26 +177,58 @@ class OpenAIAdapter(ProviderAdapter):
         usage = response.usage
         return response.choices[0].message.content, usage.prompt_tokens, usage.completion_tokens
 
-    def _via_responses(self, client, model_id, system, user, max_tokens, enable_web_search=False):
-        from openai import APIStatusError
-        kwargs: dict = {
-            "model": model_id,
-            "instructions": system or None,
-            "input": user,
-            "max_output_tokens": max_tokens,
-        }
-        use_search = enable_web_search and model_id not in _web_search_unsupported
-        if use_search:
-            kwargs["tools"] = [{"type": "web_search"}]
-        try:
-            response = client.responses.create(**kwargs)
-        except APIStatusError as e:
-            if use_search and e.status_code == 400:
-                # Model doesn't support web_search — remember and retry without it.
-                _web_search_unsupported.add(model_id)
-                del kwargs["tools"]
-                response = client.responses.create(**kwargs)
-            else:
-                raise
+    def _via_responses(self, client, model_id, system, user, max_tokens):
+        response = client.responses.create(
+            model=model_id,
+            instructions=system or None,
+            input=user,
+            max_output_tokens=max_tokens,
+        )
         usage = response.usage
         return response.output_text, usage.input_tokens, usage.output_tokens
+
+    def research(self, key, model_id, query, max_tokens=1500):
+        """Search via the Responses API web_search tool.
+
+        Sources come from url_citation annotations, which the API attaches to the
+        message parts — the search engine's own output, not the model's prose.
+        """
+        from openai import OpenAI, APIStatusError, RateLimitError
+        if model_id in _web_search_unsupported:
+            return "", [], 0, 0
+
+        client = OpenAI(api_key=key)
+        try:
+            response = client.responses.create(
+                model=model_id,
+                instructions="You are a research assistant. Search the web and report "
+                             "findings plainly, noting which source supports each point.",
+                input=query,
+                tools=[{"type": "web_search"}],
+                max_output_tokens=max_tokens,
+            )
+        except RateLimitError as e:
+            if "insufficient_quota" in str(e).lower():
+                raise QuotaExhaustedError("openai", str(e))
+            return "", [], 0, 0
+        except APIStatusError as e:
+            if e.status_code == 400:
+                _web_search_unsupported.add(model_id)
+            return "", [], 0, 0
+        except Exception:
+            return "", [], 0, 0
+
+        sources, seen = [], set()
+        for item in (getattr(response, "output", None) or []):
+            for part in (getattr(item, "content", None) or []):
+                for ann in (getattr(part, "annotations", None) or []):
+                    url = getattr(ann, "url", None)
+                    if url and url not in seen:
+                        seen.add(url)
+                        sources.append(RetrievedSource(
+                            url=url,
+                            title=str(getattr(ann, "title", "") or "")[:200],
+                        ))
+
+        usage = response.usage
+        return response.output_text, sources, usage.input_tokens, usage.output_tokens

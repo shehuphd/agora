@@ -76,6 +76,19 @@ async def create_debate(config: DebateConfig, background_tasks: BackgroundTasks)
     return {"run_id": run_id, "run_dir": run_dir.name}
 
 
+def _cleanup_run(run_id: str) -> None:
+    """Drop a finished run's in-memory registrations.
+
+    Without this, every run created in a server session stays registered forever:
+    batch_delete refuses to delete it ("running"), debate_alive reports it alive,
+    and the queues/events/pool leak.
+    """
+    for d in (_run_queues, _pause_events, _force_close_events, _overrides, _override_logs):
+        d.pop(run_id, None)
+    from core.sources import discard_pool
+    discard_pool(run_id)
+
+
 async def _run_debate_wrapper(
     run_id: str, config: DebateRunConfig, run_dir: Path,
     queue: asyncio.Queue, pause_event: asyncio.Event, overrides: dict,
@@ -89,6 +102,10 @@ async def _run_debate_wrapper(
     except Exception as e:
         await queue.put({"type": "error", "message": str(e)})
         await queue.put(None)
+    finally:
+        # An SSE client already streaming holds its own reference to the queue,
+        # so dropping the registration does not interrupt it.
+        _cleanup_run(run_id)
 
 
 @router.get("/debates/{run_id}/alive")

@@ -11,7 +11,10 @@ import json
 import time
 import urllib.error
 import urllib.request
-from providers.base import MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter, QuotaExhaustedError
+from providers.base import (
+    MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter,
+    QuotaExhaustedError, RetrievedSource,
+)
 
 _BASE_URL      = "https://api.perplexity.ai"
 _MODELS_URL    = "https://api.perplexity.ai/v1/models"
@@ -54,7 +57,7 @@ class PerplexityAdapter(ProviderAdapter):
                 result.append(ModelInfo(model_id=model_id, display_name=model_id, endpoint_type="chat_completions"))
         return result
 
-    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048, enable_web_search=False):
+    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048):
         from openai import OpenAI, RateLimitError, APIStatusError
         client = OpenAI(api_key=key, base_url=_BASE_URL)
         last_exc: Exception | None = None
@@ -89,3 +92,54 @@ class PerplexityAdapter(ProviderAdapter):
 
         assert last_exc is not None
         raise last_exc
+
+    def research(self, key, model_id, query, max_tokens=1500):
+        """Search via Perplexity's always-on retrieval.
+
+        Sonar models search on every call and return the documents they used in
+        a `search_results` field (older deployments: `citations`, bare URLs).
+        Harvested via direct HTTP because the OpenAI SDK's typed response drops
+        Perplexity's extra fields.
+        """
+        payload = json.dumps({
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": "You are a research assistant. Search the web "
+                                              "and report findings plainly, noting which "
+                                              "source supports each point."},
+                {"role": "user", "content": query},
+            ],
+            "max_tokens": max_tokens,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_BASE_URL}/chat/completions", data=payload, method="POST",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (402, 429) and "quota" in (e.read().decode("utf-8", "ignore")).lower():
+                raise QuotaExhaustedError("perplexity", f"HTTP {e.code}")
+            return "", [], 0, 0
+        except Exception:
+            return "", [], 0, 0
+
+        sources, seen = [], set()
+        for res in (data.get("search_results") or []):
+            url = res.get("url")
+            if url and url not in seen:
+                seen.add(url)
+                sources.append(RetrievedSource(
+                    url=url,
+                    title=str(res.get("title") or "")[:200],
+                    published=str(res.get("date") or "")[:40],
+                ))
+        for url in (data.get("citations") or []):
+            if url and url not in seen:
+                seen.add(url)
+                sources.append(RetrievedSource(url=url))
+
+        findings = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        usage = data.get("usage") or {}
+        return findings, sources, usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0

@@ -8,4 +8,5 @@ openai
 google-genai
 pytest
 httpx
-traceact>=0.2.0
+python-multipart
+traceact>=0.5.0

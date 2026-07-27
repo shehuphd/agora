@@ -14,16 +14,18 @@ Architecture:
 """
 from __future__ import annotations
 import asyncio
-from providers.base import ModelInfo, ProviderAdapter, QuotaExhaustedError  # noqa: F401 — re-exported
+from providers.base import (  # noqa: F401 — re-exported
+    ModelInfo, ProviderAdapter, QuotaExhaustedError, RetrievedSource,
+)
 from providers.anthropic import AnthropicAdapter
 from providers.openai import OpenAIAdapter
 from providers.google import GoogleAdapter
 from providers.perplexity import PerplexityAdapter
 
 __all__ = [
-    "ModelInfo", "QuotaExhaustedError",
+    "ModelInfo", "QuotaExhaustedError", "RetrievedSource",
     "get_adapter", "list_provider_names", "get_key_env",
-    "generate", "test_key_async", "list_models_async",
+    "generate", "research", "test_key_async", "list_models_async",
     "configure",
 ]
 
@@ -66,14 +68,29 @@ def generate(
     user: str,
     temperature: float,
     max_tokens: int = 2048,
-    enable_web_search: bool = False,
 ) -> tuple[str, int, int]:
     """Dispatch an inference call to the correct provider adapter.
 
     Called synchronously from agents running inside asyncio.to_thread().
-    Returns (text, input_tokens, output_tokens).
+    Returns (text, input_tokens, output_tokens). Tool-free by design — web
+    retrieval goes through research() instead.
     """
-    return get_adapter(provider).generate(key, model_id, endpoint_type, system, user, temperature, max_tokens, enable_web_search)
+    return get_adapter(provider).generate(key, model_id, endpoint_type, system, user, temperature, max_tokens)
+
+
+def research(
+    provider: str,
+    key: str,
+    model_id: str,
+    query: str,
+    max_tokens: int = 1500,
+):
+    """Dispatch a retrieval call to the correct provider adapter.
+
+    Returns (findings_text, sources, input_tokens, output_tokens). Providers
+    without search return no sources rather than raising.
+    """
+    return get_adapter(provider).research(key, model_id, query, max_tokens)
 
 
 async def test_key_async(provider: str, key: str, timeout: float = 20.0) -> dict:

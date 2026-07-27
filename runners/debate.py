@@ -39,7 +39,9 @@ def _write_quota_warning(provider: str) -> None:
 
 # Hard ceiling on a single LLM call. Prevents a hung provider from stalling the
 # SSE stream indefinitely. The user sees a timeout error; they can retry.
-_AGENT_TIMEOUT = 90.0  # seconds
+# A debater turn is now retrieval (~10-20s of provider-side web search) plus
+# composition plus a possible JSON-repair retry, all inside this one limit.
+_AGENT_TIMEOUT = 180.0  # seconds
 
 
 async def run_debate(
@@ -90,6 +92,25 @@ async def _run_debate_inner(
 ):
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(config.to_json())
+
+    # Bind the shared evidence pool to this run so it persists to sources.json.
+    from core.sources import get_pool
+    pool = get_pool(run_id, run_dir)
+    if continued_from:
+        # The inherited transcript cites the original run's sources; seed them
+        # so re-citing one is not stripped as fabricated.
+        try:
+            idx = _runs_db.connect()
+            row = idx.execute(
+                "SELECT run_dir FROM runs WHERE run_id=?", (continued_from,)
+            ).fetchone()
+            idx.close()
+            if row and row["run_dir"]:
+                seeded = pool.load_from(run_dir.parent / row["run_dir"] / "sources.json")
+                if seeded:
+                    print(f"[sources] seeded {seeded} source(s) from {continued_from}", flush=True)
+        except Exception as exc:
+            print(f"[sources] continuation seed failed: {exc}", flush=True)
     db_path = run_dir / "debate.db"
     conn = sqlite3.connect(str(db_path))
     init_db(conn)

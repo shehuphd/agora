@@ -438,6 +438,8 @@ a:hover { opacity: 0.8; }
   white-space: nowrap;
 }
 .btn-ghost:hover { background: var(--surface-2); color: var(--text-primary); }
+.btn-ghost:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-ghost:disabled:hover { background: none; color: inherit; }
 
 .btn-icon { padding: 8px 10px; }
 
@@ -1365,7 +1367,7 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
 
 .exp-layout {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: auto 1fr;
   gap: 0;
   height: calc(100vh - 56px);
   overflow: hidden;
@@ -1378,13 +1380,19 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* Drag the bottom-right corner to widen the pane. */
+  width: 280px;
+  min-width: 200px;
+  max-width: 520px;
+  resize: horizontal;
+  overflow: auto;
 }
 
 .exp-sidebar-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 18px 18px 14px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -1399,6 +1407,13 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
   margin: 0;
 }
 
+.exp-sidebar-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+
 .exp-create-form {
   flex-direction: column;
   gap: 8px;
@@ -1410,6 +1425,7 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
 .exp-name-inp {
   width: 100%;
   font-size: 13px;
+  font-family: var(--font-sans);
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1421,6 +1437,7 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
 .exp-desc-inp {
   width: 100%;
   font-size: 12px;
+  font-family: var(--font-sans);
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1518,6 +1535,210 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
   color: var(--text-secondary);
   margin: 0;
 }
+
+.exp-head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* CSV import panel */
+.exp-import-panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.exp-import-name-row {
+  margin-bottom: 12px;
+}
+
+.exp-import-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.exp-import-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  transition: border-color 0.15s, color 0.15s;
+}
+.exp-import-label:hover { border-color: var(--fill-accent); color: var(--text-primary); }
+
+.exp-import-label.exp-drop-active {
+  border-color: var(--fill-accent);
+  border-style: solid;
+  background: var(--bg-success, var(--surface-1));
+  color: var(--text-primary);
+}
+
+.exp-import-preview {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.exp-import-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.exp-selected-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Fixed-height, scrollable, user-resizable selection list */
+.exp-import-list-wrap {
+  height: 160px;
+  min-height: 80px;
+  max-height: 460px;
+  overflow-y: auto;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.exp-import-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.exp-check-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.exp-check-label input[type="checkbox"] {
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--fill-accent);
+}
+
+.exp-import-error {
+  font-size: 13px;
+  color: var(--danger);
+  margin: 0;
+}
+
+.exp-import-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* Batch progress */
+.exp-batch-status {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.exp-batch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.exp-batch-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.exp-batch-bar-track {
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.exp-batch-bar-fill {
+  height: 100%;
+  background: var(--fill-accent);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.exp-batch-rows-wrap {
+  height: 180px;
+  min-height: 90px;
+  max-height: 480px;
+  overflow-y: auto;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.exp-batch-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.batch-row-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--border);
+}
+.batch-row-link:hover { text-decoration-color: currentColor; }
+
+.exp-batch-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+}
+
+.batch-row-done    { color: var(--text-success); }
+.batch-row-failed  { color: var(--danger); }
+.batch-row-running { color: var(--fill-accent); }
+.batch-row-pending { color: var(--text-secondary); }
+
+.batch-row-error {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-left: 4px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { display: inline-block; animation: spin 1s linear infinite; }
 
 .exp-assign-row {
   display: flex;

@@ -10,10 +10,41 @@ import json
 import time
 import urllib.error
 import urllib.request
-from providers.base import MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter, QuotaExhaustedError
+from providers.base import (
+    MAX_ATTEMPTS, BACKOFF_BASE, ModelInfo, ProviderAdapter,
+    QuotaExhaustedError, RetrievedSource,
+)
 
 _MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 _google_search_unsupported: set[str] = set()  # models that don't support google_search grounding
+
+# Gemini returns citations as Vertex redirect links rather than publisher URLs.
+_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+
+
+def _resolve_redirects(urls: list[str], timeout: float = 8.0) -> dict[str, str]:
+    """Map Gemini redirect URLs to their real publisher URLs.
+
+    Resolved concurrently because each is a network round trip. A URL that fails
+    to resolve keeps its redirect form: it is still a genuine search result, so
+    dropping it would wrongly shrink the evidence pool.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import httpx
+
+    def _one(u: str) -> tuple[str, str]:
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True) as c:
+                # Only the final URL matters — a ranged GET avoids downloading
+                # whole page bodies just to follow the redirect chain.
+                return u, str(c.get(u, headers={"Range": "bytes=0-0"}).url)
+        except Exception:
+            return u, u
+
+    if not urls:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        return dict(pool.map(_one, urls))
 
 
 class GoogleAdapter(ProviderAdapter):
@@ -70,7 +101,7 @@ class GoogleAdapter(ProviderAdapter):
                 break
         return result
 
-    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048, enable_web_search=False):
+    def generate(self, key, model_id, endpoint_type, system, user, temperature, max_tokens=2048):
         from google import genai
         from google.genai import types
         from google.genai import errors as gerrors
@@ -84,9 +115,6 @@ class GoogleAdapter(ProviderAdapter):
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
                 }
-                if enable_web_search and model_id not in _google_search_unsupported:
-                    config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-
                 response = client.models.generate_content(
                     model=model_id,
                     contents=user,
@@ -103,11 +131,6 @@ class GoogleAdapter(ProviderAdapter):
                 # Permanent 404 (model not found) — do not retry.
                 if status == 404 and any(k in msg for k in ("not found", "does not exist", "invalid model")):
                     raise
-                # Google Search not supported for this model — retry without it.
-                if enable_web_search and model_id not in _google_search_unsupported and status == 400 and "tool" in msg:
-                    _google_search_unsupported.add(model_id)
-                    last_exc = e
-                    continue
                 if status in (429, 404) and attempt < MAX_ATTEMPTS - 1:
                     last_exc = e
                     time.sleep(BACKOFF_BASE * (2 ** attempt))
@@ -123,3 +146,63 @@ class GoogleAdapter(ProviderAdapter):
 
         assert last_exc is not None
         raise last_exc
+
+    def research(self, key, model_id, query, max_tokens=1500):
+        """Search via the Interactions API with the google_search tool.
+
+        The legacy generate_content + grounding_metadata path returns no grounding
+        chunks on current models; Interactions returns url_citation annotations.
+        Those carry Vertex redirect links, which are resolved to publisher URLs here.
+        """
+        from google import genai
+        if model_id in _google_search_unsupported:
+            return "", [], 0, 0
+
+        try:
+            client = genai.Client(api_key=key)
+            interaction = client.interactions.create(
+                model=model_id,
+                input="Search the web and report findings plainly, noting which "
+                      f"source supports each point.\n\n{query}",
+                tools=[{"type": "google_search"}],
+            )
+            data = interaction.model_dump()
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("billing", "quota", "exhausted", "exceeded")):
+                raise QuotaExhaustedError("google", str(e))
+            if "tool" in msg or "not supported" in msg:
+                _google_search_unsupported.add(model_id)
+            return "", [], 0, 0
+
+        # Harvest url_citation annotations off the model_output step.
+        raw: dict[str, str] = {}   # url -> title
+        for step in (data.get("steps") or []):
+            if step.get("type") != "model_output":
+                continue
+            for part in (step.get("content") or []):
+                for ann in (part.get("annotations") or []):
+                    url = ann.get("url")
+                    if url and url not in raw:
+                        raw[url] = str(ann.get("title") or "")[:200]
+
+        redirects = [u for u in raw if _REDIRECT_HOST in u]
+        resolved = _resolve_redirects(redirects)
+
+        sources, seen = [], set()
+        for url, title in raw.items():
+            final = resolved.get(url, url)
+            if final in seen:
+                continue
+            seen.add(final)
+            sources.append(RetrievedSource(url=final, title=title))
+
+        usage = data.get("usage") or {}
+        # Thought tokens are billed but reported separately from output tokens.
+        output_tokens = (usage.get("total_output_tokens") or 0) + (usage.get("total_thought_tokens") or 0)
+        return (
+            getattr(interaction, "output_text", "") or "",
+            sources,
+            usage.get("total_input_tokens") or 0,
+            output_tokens,
+        )
