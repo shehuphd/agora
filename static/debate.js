@@ -179,10 +179,9 @@ export async function loadDebate(runId) {
         // Stuck running means server restarted — server will confirm continuability.
         _offerContinue();
       }
+      _openSSE(runId);
     }
   } catch (e) { console.warn('debate state load failed', e); }
-
-  _openSSE(runId);
 }
 
 function _wireRerunButton(cfg) {

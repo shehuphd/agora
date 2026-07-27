@@ -267,6 +267,8 @@ export function markDebateClosed() {
   }
   const endBtn = document.getElementById('btn-end');
   if (endBtn) endBtn.disabled = true;
+  const pauseBtn = document.getElementById('btn-pause');
+  if (pauseBtn) pauseBtn.disabled = true;
 
   const rerunBtn = document.getElementById('btn-rerun');
   if (rerunBtn) rerunBtn.style.display = 'flex';
