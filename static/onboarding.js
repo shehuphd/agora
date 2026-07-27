@@ -11,8 +11,11 @@ const _LLM_PROVIDERS = [
   ['perplexity', 'PERPLEXITY_API_KEY', 'perplexity.ai/settings/api'],
 ];
 
-const _SEARXNG_CMD =
-  'docker run -d --name searxng -p 8888:8080 -v searxng-config:/etc/searxng searxng/searxng';
+const _SEARXNG_CMDS = [
+  'brew install --cask docker   # or: https://docs.docker.com/get-docker/',
+  'docker run -d --name searxng -p 8888:8080 -v searxng-config:/etc/searxng searxng/searxng',
+  'docker exec searxng sed -i \'s/formats: \\[]/formats: [json]/\' /etc/searxng/settings.yml && docker restart searxng',
+].join('\n');
 
 /**
  * Open the wizard when the app looks unconfigured (no valid LLM key).
@@ -171,14 +174,26 @@ async function _renderSearchStep(overlay, body, foot) {
     </div>
 
     <div class="ob-search-option">
-      <span class="ob-search-label">option 2 — SearXNG <span class="field-hint">(free, self-hosted, needs
-        <a href="https://docs.docker.com/get-docker/" target="_blank" rel="noopener">Docker</a>)</span></span>
-      <pre class="ob-cmd"><code>${esc(_SEARXNG_CMD)}</code></pre>
-      <p class="field-hint" style="margin:6px 0 0">then enable the JSON API: add
-      <code>json</code> under <code>search.formats</code> in the container's settings.yml and restart.</p>
+      <span class="ob-search-label">option 2 — SearXNG <span class="field-hint">(free, self-hosted)</span></span>
+      <div class="ob-cmd-wrap">
+        <pre class="ob-cmd"><code>${esc(_SEARXNG_CMDS)}</code></pre>
+        <button class="btn-ghost btn-sm ob-copy" title="copy all"><i class="ti ti-copy" aria-hidden="true"></i></button>
+      </div>
+      <p class="field-hint" style="margin:6px 0 0">Installs Docker, starts SearXNG, and enables the JSON API in one go.</p>
     </div>
   `;
   _wireKeyRows(body, () => _renderSearchStep(overlay, body, foot));
+  const copyBtn = body.querySelector('.ob-copy');
+  if (copyBtn) copyBtn.onclick = () => {
+    navigator.clipboard.writeText(_SEARXNG_CMDS).then(() => {
+      copyBtn.innerHTML = '<i class="ti ti-check" aria-hidden="true"></i>';
+      setTimeout(() => { copyBtn.innerHTML = '<i class="ti ti-copy" aria-hidden="true"></i>'; }, 1500);
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = _SEARXNG_CMDS; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove();
+    });
+  };
 
   foot.innerHTML = `
     <button class="btn-ghost btn-sm" id="ob-back"><i class="ti ti-arrow-left" aria-hidden="true"></i> back</button>
