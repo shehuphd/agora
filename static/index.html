@@ -117,6 +117,14 @@
       <p class="pg-sub">configure participants, topic, and thresholds before starting</p>
     </div>
   </div>
+  <div id="search-tier-warning" class="search-tier-warning" style="display:none">
+    <i class="ti ti-alert-triangle" aria-hidden="true"></i>
+    <span>No flat-cost search backend found — agents will fall back to vendor web search,
+    which is billed through your token budget (one observed search cost 18k tokens).
+    Install <a href="https://docs.searxng.org/" target="_blank" rel="noopener">SearXNG</a>
+    for free local search, or add a
+    <a href="https://serper.dev" target="_blank" rel="noopener">Serper API key</a> in Settings.</span>
+  </div>
   <form id="new-debate-form">
 
     <!-- Experiment field — outside cards, scopes the whole run -->
@@ -509,6 +517,9 @@
       <h1 class="pg-title">settings</h1>
       <p class="pg-sub">API keys, defaults, and token tracking</p>
     </div>
+    <button class="btn-ghost" id="btn-launch-onboarding" style="align-self:flex-start">
+      <i class="ti ti-wand" aria-hidden="true"></i> setup wizard
+    </button>
   </div>
 
   <div class="card">
@@ -652,8 +663,8 @@
         </div>
       </div>
     </div>
-    <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);display:flex;gap:24px">
-      <div class="thresh-row" style="flex:1">
+    <div class="thresh-stack">
+      <div class="thresh-row">
         <div class="thresh-right">
           <input type="range" min="2" max="10" value="6" step="1" id="s-history-window"
             oninput="this.nextElementSibling.textContent=this.value">
@@ -664,7 +675,18 @@
           <p class="field-hint" style="margin-top:3px;margin-bottom:0">How many recent acts each agent sees verbatim. Older acts are compacted to a summary. Lower = cheaper per turn; higher = richer context. Default: 6, max: 10.</p>
         </div>
       </div>
-      <div class="thresh-row" style="flex:1">
+      <div class="thresh-row">
+        <div class="thresh-right">
+          <input type="range" min="0" max="25" value="10" step="1" id="s-chapter-every"
+            oninput="this.nextElementSibling.textContent=this.value==0?'off':this.value">
+          <span class="thresh-val">10</span>
+        </div>
+        <div>
+          <span class="thresh-label">chapter summary every K turns</span>
+          <p class="field-hint" style="margin-top:3px;margin-bottom:0">On long debates, the synthesiser writes a short chapter summary every K debater turns and works from those at close. 0 = off. Default: 10.</p>
+        </div>
+      </div>
+      <div class="thresh-row">
         <div class="thresh-right">
           <select id="s-history-page-size" style="width:100px">
             <option value="50">50 runs</option>

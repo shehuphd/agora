@@ -140,10 +140,21 @@ export async function loadDebate(runId) {
         const tv = document.getElementById('term-turns-val');
         if (tv) tv.textContent = `0 / ${debateCfg.max_turns}`;
       }
+      let _lastTurn = null;
       (data.acts || []).forEach(act => {
         appendActBubble(act);
         _accumulateTokens(act);
+        if (act.turn != null) _lastTurn = act.turn;
+        // Replay STATUS acts into the termination tracker — without this a
+        // closed debate loaded from history shows 0/N turns and no challenges,
+        // since the tracker otherwise only updates from live SSE events.
+        if (act.act_type === 'STATUS') {
+          try { updateTerminationTracker(JSON.parse(act.content), debateCfg); } catch (_) {}
+        }
       });
+      if (_lastTurn != null) {
+        document.getElementById('dh-turn-badge').textContent = `turn ${_lastTurn}`;
+      }
       (data.override_log || []).forEach(ov => {
         if (ov.field === 'token_budget') _effectiveBudget = ov.new_value;
       });
@@ -290,7 +301,7 @@ function _openSSE(runId) {
     _accumulateTokens(act);
     renderTokenStrip(debateTok, _effectiveBudget || debateCfg.token_budget || 100_000);
 
-    if (act.turn) {
+    if (act.turn != null) {   // 0 is a valid turn — a truthiness check skipped it
       document.getElementById('dh-turn-badge').textContent = `turn ${act.turn}`;
     }
 

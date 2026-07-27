@@ -318,6 +318,30 @@ class TurnOrchestrator:
     def _effective_token_budget(self) -> int:
         return self._overrides.get("token_budget", self.config.protocol.token_budget)
 
+    async def _maybe_summarise_chapter(self) -> None:
+        """Every K debater turns (agent_settings.chapter_every, 0 = off), have
+        the synthesiser write a chapter summary and store it on state. Amortises
+        the synthesiser's close-time work across the run; failures cost detail,
+        never the debate."""
+        try:
+            from api.routers.settings import _load_config
+            k = int((_load_config().get("agent_settings") or {}).get("chapter_every", 0) or 0)
+        except Exception:
+            k = 0
+        if k <= 0 or self.state.turn == 0 or self.state.turn % k != 0:
+            return
+        chapters = getattr(self.state, "chapters", None)
+        if chapters is None:
+            self.state.chapters = chapters = []
+        start = self.state.turn - k + 1
+        if any(f"[Turns {start}-" in c for c in chapters):
+            return  # already summarised (e.g. after a pause/resume on the same turn)
+        summary = await self._loop.run_in_executor(
+            None, self.synthesiser.summarise_chapter, self.state, start, self.state.turn,
+        )
+        if summary:
+            chapters.append(summary)
+
     async def _wait_if_paused(self) -> None:
         if not self._pause_event.is_set():
             await self.event_queue.put({"type": "paused"})
@@ -489,6 +513,7 @@ class TurnOrchestrator:
                         "closed": False,
                     })
 
+                await self._maybe_summarise_chapter()
                 turn_idx += 1
 
         finally:

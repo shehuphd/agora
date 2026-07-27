@@ -27,6 +27,7 @@ class RetrievedSource:
     title: str = ""
     snippet: str = ""      # description of the content, when the provider gives one
     published: str = ""    # provider-reported age/date; evidence freshness, not description
+    excerpt: str = ""      # extracted page text (markdown, capped) — untrusted web content
 
 
 class QuotaExhaustedError(Exception):

@@ -6,6 +6,7 @@ import { loadDebate }   from './debate.js?v=4';
 import { loadExperiments } from './experiments.js?v=4';
 import { loadTraces } from './traces.js?v=1';
 import { esc, formatTokens } from './render.js?v=4';
+import { launchOnboarding, maybeAutoLaunch } from './onboarding.js?v=1';
 
 // ============================================================
 // ROUTING
@@ -47,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initTheme();
   _fetchAvailableModels().then(() => route());
   loadNavTokenTotal();
+  maybeAutoLaunch();   // first-run setup wizard when no LLM key is configured
 });
 
 // ============================================================
@@ -300,6 +302,15 @@ function _prefillFromPending(cfg) {
 }
 
 async function loadNew() {
+  // Warn when retrieval would fall back to token-billed vendor search.
+  fetch('/api/search-status')
+    .then(r => r.ok ? r.json() : null)
+    .then(s => {
+      const el = document.getElementById('search-tier-warning');
+      if (el && s) el.style.display = s.neutral ? 'none' : 'flex';
+    })
+    .catch(() => {});
+
   let keyStatus = {};
   let agentCfg  = {};
   try {
@@ -548,7 +559,7 @@ async function loadSettings() {
     const data = await res.json();
 
     container.innerHTML = '';
-    const KEY_MAP = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', google: 'GOOGLE_API_KEY', perplexity: 'PERPLEXITY_API_KEY' };
+    const KEY_MAP = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', google: 'GOOGLE_API_KEY', perplexity: 'PERPLEXITY_API_KEY', serper: 'SERPER_API_KEY' };
     const warnings = data.key_warnings || {};
 
     Object.entries(KEY_MAP).forEach(([provider, envName]) => {
@@ -578,9 +589,12 @@ async function loadSettings() {
         : '';
 
       const modelCount = _availableModels.filter(m => m.provider === provider).length;
-      const usedByHtml = (info.valid && modelCount > 0)
-        ? `<span class="key-used-by">${modelCount} model${modelCount !== 1 ? 's' : ''} available</span>`
-        : '';
+      // Serper is a search key, not an LLM key — no model count to report.
+      const usedByHtml = provider === 'serper'
+        ? (info.valid ? `<span class="key-used-by">web search now enabled</span>` : '')
+        : (info.valid && modelCount > 0)
+          ? `<span class="key-used-by">${modelCount} model${modelCount !== 1 ? 's' : ''} available</span>`
+          : '';
 
       row.innerHTML = `
         <span class="key-name">${esc(envName)}</span>
@@ -742,6 +756,16 @@ async function loadSettings() {
       }
     }
 
+    const ce = data.config?.agent_settings?.chapter_every;
+    if (ce != null) {
+      const ceEl = document.getElementById('s-chapter-every');
+      if (ceEl) {
+        ceEl.value = ce;
+        const ceVal = ceEl.nextElementSibling;
+        if (ceVal) ceVal.textContent = ce == 0 ? 'off' : ce;
+      }
+    }
+
     const ps = data.config?.ui?.history_page_size;
     if (ps != null) {
       const psEl = document.getElementById('s-history-page-size');
@@ -750,6 +774,9 @@ async function loadSettings() {
     }
 
   } catch (e) { console.error('settings load failed', e); }
+
+  const obBtn = document.getElementById('btn-launch-onboarding');
+  if (obBtn) obBtn.onclick = () => launchOnboarding();
 
   document.getElementById('btn-reset-tokens').onclick = async () => {
     await fetch('/settings/reset-tokens', { method: 'POST' });
@@ -773,6 +800,7 @@ async function loadSettings() {
       },
       agent_settings: {
         history_window: parseInt(document.getElementById('s-history-window').value),
+        chapter_every:  parseInt(document.getElementById('s-chapter-every')?.value || '10'),
       },
       ui: {
         history_page_size: parseInt(document.getElementById('s-history-page-size')?.value || '50'),

@@ -65,6 +65,11 @@ async def _validate_all_keys(keys: dict) -> dict:
 
     if to_validate:
         async def _run(provider: str, value: str):
+            if provider == "serper":
+                # Search key, not an LLM key — no model list to refresh.
+                r = await asyncio.to_thread(_test_serper_key, value)
+                _key_cache[provider] = {"key": value, "result": r, "ts": time.time()}
+                return provider, r
             r = await test_key_async(provider, value)
             _key_cache[provider] = {"key": value, "result": r, "ts": time.time()}
             # Fire-and-forget model refresh (don't block the key status response).
@@ -137,7 +142,7 @@ router = APIRouter()
 CONFIG_PATH    = Path(__file__).parent.parent.parent / "config" / "defaults.yaml"
 
 _FACTORY_DEFAULTS = {
-    "agent_settings": {"history_window": 6},
+    "agent_settings": {"history_window": 6, "chapter_every": 10},
     "ui": {"history_page_size": 50},
     "agents": {
         "proposition": {"temperature": 0.7, "max_claims": 5},
@@ -170,10 +175,32 @@ _WARNINGS_PATH = Path(__file__).parent.parent.parent / "config" / "key_warnings.
 
 def _key_env_name(provider: str) -> str:
     """Return the env var name for a provider's API key. Raises 400 for unknown providers."""
+    if provider == "serper":
+        # Search service, not an LLM provider — key managed here, used by core/search.
+        return "SERPER_API_KEY"
     try:
         return get_key_env(provider)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+
+def _test_serper_key(key: str) -> dict:
+    """Validate a Serper key with a minimal search."""
+    import httpx
+    try:
+        r = httpx.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": key, "Content-Type": "application/json"},
+            json={"q": "ping", "num": 1},
+            timeout=10.0,
+        )
+        if r.status_code == 200:
+            return {"present": True, "valid": True, "error": None}
+        if r.status_code in (401, 403):
+            return {"present": True, "valid": False, "error": "Invalid API key"}
+        return {"present": True, "valid": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"present": True, "valid": False, "error": str(e)[:60]}
 
 
 def _load_key_warnings() -> dict:
@@ -219,6 +246,18 @@ def _total_tokens_from_runs() -> dict:
     return totals
 
 
+@router.get("/api/search-status")
+async def search_status():
+    """Which search tier will answer the next retrieval.
+
+    'searxng' and 'serper' are flat-cost neutral tiers; 'provider' means
+    retrieval falls back to token-billed vendor search — the UI warns on that.
+    """
+    from core import search as _search
+    tier = await asyncio.to_thread(_search.active_tier)
+    return {"tier": tier, "neutral": tier != "provider"}
+
+
 @router.get("/settings")
 async def get_settings():
     """Return API key validity, current config, global token totals, and env path."""
@@ -229,6 +268,7 @@ async def get_settings():
         p: (os.environ.get(get_key_env(p)) or "").strip()
         for p in list_provider_names()
     }
+    raw_keys["serper"] = (os.environ.get("SERPER_API_KEY") or "").strip()
     key_info   = await _validate_all_keys(raw_keys)
     # key_status stays True only for valid keys — gates model dropdowns everywhere.
     key_status = {p: info["valid"] for p, info in key_info.items()}

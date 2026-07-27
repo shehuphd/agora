@@ -22,10 +22,10 @@ async def lifespan(app: FastAPI):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     _TRACES_PATH.parent.mkdir(parents=True, exist_ok=True)
     _configure_tracing(
+        project="agora",
         config=TraceConfig(
             enabled=True,
             sink_mode="blocking",
-            # Explicit rather than relying on the library default.
             capture_inputs=True,
             capture_outputs=True,
             redaction_presets=["api_keys"],

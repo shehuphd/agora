@@ -56,6 +56,7 @@ class Source:
     title: str = ""
     snippet: str = ""       # description of the content, when the provider gives one
     published: str = ""     # provider-reported date; evidence freshness, not description
+    excerpt: str = ""       # extracted page text (markdown, capped) — untrusted web content
     provider: str = ""
     harvested_by: str = ""      # agent role that ran the search
     query: str = ""             # search query that surfaced it

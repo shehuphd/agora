@@ -112,6 +112,7 @@ class DialogueState:
     closed_at: Optional[str]
     closure_reason: Optional[str]
     steelman_mode: bool = False          # True = Rapoport mode (require steelman)
+    chapters: list = field(default_factory=list)  # LLM chapter summaries, every K turns (see agent_settings.chapter_every)
 
 
 def legal_acts_for(state: DialogueState) -> list:
@@ -227,13 +228,14 @@ def apply_act(state: DialogueState, act: Act) -> None:
         state.turn += 1
 
     elif act.act_type == "STATUS":
-        # Moderator summary — advance turn without changing phase
-        state.turn += 1
+        # Moderator summary — auxiliary participants don't consume debate turns.
+        # max_turns budgets debater moves only; before this, every STATUS act
+        # silently halved the effective turn budget.
+        pass
 
     elif act.act_type == "MODERATOR_INTERVENTION":
-        # Log only; phase advances to reflect intervention
+        # Log only; phase advances to reflect intervention. No turn consumed.
         state.phase = "moderator_intervention"
-        state.turn += 1
 
     elif act.act_type == "CLOSE":
         # Finalise debate

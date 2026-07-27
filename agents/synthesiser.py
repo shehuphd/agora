@@ -88,6 +88,11 @@ class SynthesiserAgent(BaseAgent):
         return self._parse_synthesiser_response(raw, state, input_tok, output_tok)
 
     def _build_prompt(self, state: DialogueState) -> tuple[str, str]:
+        """Digest, not transcript: claims in final form, turn cards for the arc,
+        the acts' own reason fields (the agents narrating their moves), plus any
+        chapter summaries. Full act text is omitted — on long debates it is the
+        bulk of the input and the map needs structure, not prose.
+        """
         closed_state_json = json.dumps({
             "topic": self._sanitize(state.topic),
             "closure_reason": getattr(state, "closure_reason", None),
@@ -100,29 +105,58 @@ class SynthesiserAgent(BaseAgent):
                 }
                 for cid, c in state.claims.items()
             },
-            "act_log": [
-                {
-                    "act_id": a.act_id,
-                    "agent_role": a.agent_role,
-                    "act_type": a.act_type,
-                    "content": self._sanitize(a.content),
-                    "claim_id": getattr(a, "claim_id", None),
-                    "target_act_id": getattr(a, "target_act_id", None),
-                }
-                for a in state.acts
+            "move_reasons": [
+                {"act_id": a.act_id, "turn": a.turn, "agent_role": a.agent_role,
+                 "act_type": a.act_type, "reason": self._sanitize(a.reason)}
+                for a in state.acts if a.reason
             ],
         }, indent=2)
+
+        chapters = getattr(state, "chapters", None) or []
+        chapters_block = (
+            "<chapter_summaries>\n" + "\n\n".join(chapters) + "\n</chapter_summaries>\n"
+            if chapters else ""
+        )
 
         user = f"""\
 <debate_data>
 <closed_dialogue_state>
 {closed_state_json}
 </closed_dialogue_state>
-</debate_data>
+<turn_cards>
+{self._format_turn_cards(state)}
+</turn_cards>
+{chapters_block}</debate_data>
 
 Your role is synthesiser. The debate has closed. Produce exactly one ARGUMENT_MAP JSON object. No other text.\
 """
         return _SYSTEM, user
+
+    def summarise_chapter(self, state: DialogueState, start_turn: int, end_turn: int) -> str:
+        """Write one chapter summary covering turns [start_turn, end_turn].
+
+        Called by the runner every K turns (agent_settings.chapter_every).
+        Plain-text call, no pool, no JSON contract. Raises nothing upward —
+        a failed chapter costs detail, never the debate.
+        """
+        acts = [a for a in state.acts if start_turn <= a.turn <= end_turn]
+        if not acts:
+            return ""
+        lines = []
+        for a in acts:
+            lines.append(f"T{a.turn} {a.agent_role} {a.act_type}: {self._sanitize(a.content)[:400]}")
+        try:
+            text, _i, _o = self._call_provider(
+                "You summarise debate chapters. Write 3-5 plain sentences covering the "
+                "argumentative moves in these turns: what was claimed, challenged, "
+                "conceded, and how positions shifted. No preamble, no JSON.",
+                "\n".join(lines),
+                max_tokens=300,
+            )
+            return f"[Turns {start_turn}-{end_turn}] {text.strip()}"
+        except Exception as exc:
+            print(f"[synthesiser] chapter summary failed: {exc}", flush=True)
+            return ""
 
     def _parse_synthesiser_response(self, raw: str, state: DialogueState, input_tokens: int, output_tokens: int) -> Act:
         """Parse ARGUMENT_MAP JSON into an Act. Full JSON stored as content for frontend rendering."""

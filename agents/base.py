@@ -129,37 +129,83 @@ class BaseAgent:
     def _retrieve(self, state: DialogueState, pool) -> tuple[int, int]:
         """Search the web for this turn and pool whatever comes back.
 
-        Returns (input_tokens, output_tokens) so retrieval stays inside the run's
-        token budget. Never raises: a failed search leaves the pool as-is and the
-        agent argues from what is already there.
-        """
-        from core.sources import Source
-        from providers import research as _research
+        Neutral search first (SearXNG → Serper): the model writes the query
+        (~300 tokens), a search service executes it at flat cost, and the SERP
+        never touches the context window. Only when no neutral tier is up does
+        this fall back to token-billed provider search.
 
-        query = self._research_query(state)
+        Returns (input_tokens, output_tokens) so retrieval stays inside the run's
+        token budget. Never raises (except quota): a failed search leaves the
+        pool as-is and the agent argues from what is already there.
+        """
+        from core import search as _search
+        from core.sources import Source
+
+        query, q_in, q_out = self._write_search_query(state)
         if not query:
             return 0, 0
-        try:
-            key = os.environ[_KEY_ENV_MAP[self._provider]]
-            _findings, sources, in_tok, out_tok = _research(
-                self._provider, key, self.model, query,
-            )
-        except QuotaExhaustedError:
-            raise
-        except Exception as exc:
-            print(f"[sources] retrieval failed ({self.role}): {exc}", flush=True)
-            return 0, 0
+
+        provider_label = self._provider
+        in_tok, out_tok = q_in, q_out
+        run_dir = getattr(pool, "_path", None)
+        run_dir = run_dir.parent if run_dir else None
+
+        tier, sources = _search.search(query, max_results=8, run_dir=run_dir)
+        if tier != "none":
+            _search.enrich_sources(sources, top_k=2)
+            provider_label = tier
+        else:
+            # Token-billed vendor search — the expensive path. active_tier()
+            # already reports 'provider' so the UI can warn before this happens.
+            from providers import research as _research
+            try:
+                key = os.environ[_KEY_ENV_MAP[self._provider]]
+                _findings, sources, r_in, r_out = _research(
+                    self._provider, key, self.model, query,
+                )
+                in_tok += r_in
+                out_tok += r_out
+            except QuotaExhaustedError:
+                raise
+            except Exception as exc:
+                print(f"[sources] retrieval failed ({self.role}): {exc}", flush=True)
+                return in_tok, out_tok
 
         pool.add_many([
             Source(
                 url=s.url, title=s.title, snippet=s.snippet,
                 published=getattr(s, "published", ""),
-                provider=self._provider, harvested_by=self.role,
+                excerpt=getattr(s, "excerpt", ""),
+                provider=provider_label, harvested_by=self.role,
                 query=query, turn=state.turn,
             )
             for s in sources
         ])
         return in_tok, out_tok
+
+    def _write_search_query(self, state: DialogueState) -> tuple[str, int, int]:
+        """Have this agent's own model write the search query.
+
+        Query formulation is the model skill worth measuring once execution is
+        neutral — a tiny call (~300 tokens) preserves it as an experimental
+        variable. Falls back to the mechanical query on any failure.
+
+        Returns (query, input_tokens, output_tokens).
+        """
+        mechanical = self._research_query(state)
+        try:
+            raw, q_in, q_out = self._call_provider(
+                "You write web search queries. Reply with ONE query of at most "
+                "12 words. No quotes, no prose, no explanation.",
+                f"Find evidence for your side of this debate.\n{mechanical[:600]}",
+                max_tokens=40,
+            )
+            query = (raw or "").strip().strip('"').splitlines()[0][:140]
+            return (query or mechanical), q_in, q_out
+        except QuotaExhaustedError:
+            raise
+        except Exception:
+            return mechanical, 0, 0
 
     def _research_query(self, state: DialogueState) -> str:
         """What this agent should go and look up before speaking.
@@ -284,6 +330,25 @@ class BaseAgent:
     def _sanitize(self, text: str) -> str:
         """Strip structural tags that could shift section boundaries in the prompt."""
         return _INJECTION_TAG_RE.sub("", str(text or ""))
+
+    def _format_turn_cards(self, state: DialogueState) -> str:
+        """Mechanical one-liner per act — the whole debate at ~25 tokens/turn.
+
+        Built from structured fields, never by an LLM: zero cost, deterministic,
+        cannot hallucinate the state it reports. Replaces the full transcript for
+        auxiliary agents (moderator, synthesiser), whose input otherwise grows
+        with the square of debate length.
+        """
+        if not state.acts:
+            return "(no acts yet)"
+        cards = []
+        for a in state.acts:
+            target = f"→{a.claim_id}" if a.claim_id else ""
+            cards.append(
+                f"T{a.turn} {a.agent_role} {a.act_type}{target}: "
+                f"{self._sanitize(a.content)[:80]}"
+            )
+        return "\n".join(cards)
 
     @staticmethod
     def _strip_and_parse(raw: str) -> dict:
@@ -412,7 +477,7 @@ class BaseAgent:
         except Exception:
             return "default"
 
-    def _call_provider(self, system: str, user: str) -> tuple[str, int, int]:
+    def _call_provider(self, system: str, user: str, max_tokens: int = 2048) -> tuple[str, int, int]:
         """Route inference to the correct provider adapter via the central router."""
         from providers import generate as _router_generate
         key_env = _KEY_ENV_MAP.get(self._provider)
@@ -421,5 +486,5 @@ class BaseAgent:
         key = os.environ[key_env]
         return _router_generate(
             self._provider, key, self.model, self._endpoint_type,
-            system, user, self.temperature,
+            system, user, self.temperature, max_tokens,
         )

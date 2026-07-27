@@ -184,14 +184,31 @@ class ModeratorAgent(BaseAgent):
             f"{closure_label} Emit a CLOSE act."
         ) if should_close else ""
 
+        # Protocol policing needs state, not prose: turn cards give the whole
+        # debate at ~25 tokens/turn; only the last two acts appear in full.
+        # This keeps moderator input flat instead of growing with the transcript
+        # (it was 32% of a 4-turn debate's entire spend, and rising per turn).
+        recent = state.acts[-2:]
+        recent_lines = []
+        for a in recent:
+            recent_lines.append(
+                f"[Turn {a.turn} | act_id:{a.act_id}] {a.agent} ({a.agent_role}) — "
+                f"{a.act_type}: {self._sanitize(a.content)}"
+            )
+            if a.reason:
+                recent_lines.append(f"  reason: {self._sanitize(a.reason)}")
+
         user = f"""\
 <debate_data>
 <dialogue_state>
 {dialogue_state_json}
 </dialogue_state>
-<act_history>
-{self._format_act_history(state)}
-</act_history>
+<turn_cards>
+{self._format_turn_cards(state)}
+</turn_cards>
+<latest_acts>
+{chr(10).join(recent_lines) or "(no acts yet)"}
+</latest_acts>
 </debate_data>
 
 Your role is moderator. Emit exactly one JSON object (STATUS or CLOSE). No other text.{close_directive}\

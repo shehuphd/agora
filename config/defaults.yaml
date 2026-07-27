@@ -1,4 +1,5 @@
 agent_settings:
+  chapter_every: 10
   history_window: 6
 agents:
   moderator:

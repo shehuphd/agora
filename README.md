@@ -2,7 +2,9 @@
 
 Agora runs structured debates between two LLM agents using a typed speech-act protocol. A Proposition agent asserts falsifiable claims, an Opposition agent challenges them across multiple dimensions, a Moderator enforces legal act sequences and termination conditions, and a Synthesiser produces an argument map after closure.
 
-Supports any combination of Anthropic, OpenAI, and Google Gemini models — including cross-provider debates (e.g. Claude vs Gemini). Runs locally with no external services beyond the LLM APIs.
+Supports any combination of Anthropic, OpenAI, Google Gemini, and Perplexity models — including cross-provider debates (e.g. Claude vs Gemini). Runs locally with no external services beyond the LLM APIs.
+
+Built by [Mo Shehu](https://mohammedshehu.com).
 
 ## Quick start
 
@@ -10,7 +12,7 @@ Supports any combination of Anthropic, OpenAI, and Google Gemini models — incl
 git clone https://github.com/shehuphd/agora
 cd agora
 pip install -r requirements.txt
-cp .env.example .env          # add at least one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY
+cp .env.example .env          # add at least one LLM key; optionally SERPER_API_KEY for flat-cost search
 uvicorn api.main:app --reload --port 8502
 ```
 
@@ -24,7 +26,9 @@ Open [http://localhost:8502](http://localhost:8502).
 | New Debate | `#/new` | Full config: topic, models, nicknames, temperature, aggression, protocol thresholds |
 | Confirm | `#/confirm` | Review all settings before launching |
 | Debate View | `#/debate/:id` | Live act stream via SSE; token budget bar; termination tracker; pause and end controls |
-| Settings | `#/settings` | API key status with inline editing; quota-exhaustion warnings; agent model defaults; protocol defaults; lifetime token counter |
+| Experiments | `#/experiments` | Group runs into experiments; CSV batch import with parallel execution |
+| Traces | `#/traces` | Query and inspect traceact traces; launch the full viewer |
+| Settings | `#/settings` | API keys, search backend status, agent defaults, protocol defaults, onboarding wizard |
 
 ## Architecture
 
@@ -83,6 +87,7 @@ User-requested end: the End button triggers an orderly close — the Moderator r
 | OpenAI (GPT-5) | `gpt-5.6` (Sol), `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5` |
 | OpenAI (GPT-4 / o-series) | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o3`, `o3-mini`, `o4-mini`, `o1` |
 | Google | `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash` |
+| Perplexity | `sonar`, `sonar-pro`, `sonar-deep-research` |
 
 Any agent role can be assigned any model from any provider. Model dropdowns are gated by key presence — a model whose provider key is absent is shown as disabled.
 
@@ -100,6 +105,18 @@ All thresholds are set per-run in the New Debate form and stored in the session 
 | `repetition_tolerance` | 2 | Max repeated claim cycles before closure |
 | `aggression` | 0.5 | Opposition aggression: 0 = cautious, 1 = challenge everything |
 
+## Web search
+
+Debaters ground claims through web search. A neutral search backend keeps retrieval off the token budget:
+
+| Tier | Config | Cost |
+|------|--------|------|
+| SearXNG (preferred) | `SEARXNG_URL` in `.env` or self-host via Docker | Free |
+| Serper | `SERPER_API_KEY` in `.env` | ~$1 per 1k searches |
+| Provider fallback | No config needed | Token-billed (warning shown) |
+
+The fallback chain tries SearXNG first, then Serper, then the LLM provider's built-in search. A first-launch onboarding wizard walks through setup.
+
 ## API keys
 
 Keys are set in `.env`. The Settings screen shows whether each key is present and lets you paste a new key inline — no server restart needed. If a key causes a quota-exhaustion error mid-debate, a warning badge appears on that key in Settings and clears when the key is updated.
@@ -108,9 +125,12 @@ Keys are set in `.env`. The Settings screen shows whether each key is present an
 ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 GOOGLE_API_KEY=...
+PERPLEXITY_API_KEY=...
+SERPER_API_KEY=...
+SEARXNG_URL=http://127.0.0.1:8888
 ```
 
-At least one key is required. Only providers with a key present will have their models available in the debate form.
+At least one LLM key is required. Only providers with a key present will have their models available in the debate form.
 
 ## Output
 
@@ -126,16 +146,21 @@ Export a run (JSON or Markdown) from the history table or the debate view.
 
 All agent prompts use a system/user message split. Agent content never appears in the system prompt. An allowlist (`_ALLOWED_ACT_TYPES`) rejects any act type a role is not permitted to emit. Input is sanitised to strip structural tags before insertion into prompts. API keys are written only to the local `.env` file and never returned in API responses.
 
+## Tracing
+
+All agent actions, searches, and API calls are traced via [traceact](https://github.com/traceact/traceact). Traces write to `data/traces/traces.jsonl` with 50MB rotation. The Traces screen queries them inline; the "open viewer" button launches traceact's full viewer pre-filtered to the selected run.
+
 ## Tests
 
 ```bash
 pytest tests/
 ```
 
-80+ tests covering: ActType enum, state transitions, `apply_act` for all act types, `_strip_and_parse`, allowlist enforcement, content truncation, and rolling history compaction.
+79 tests covering: ActType enum, state transitions, `apply_act` for all act types, `_strip_and_parse`, allowlist enforcement, content truncation, and rolling history compaction.
 
 ## Requirements
 
 - Python 3.10+
-- At least one API key in `.env`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`
+- At least one API key in `.env`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, or `PERPLEXITY_API_KEY`
 - No database server — SQLite per session under `runs/`
+- Docker (optional) — for self-hosted SearXNG search

@@ -88,7 +88,7 @@ async function _load() {
     if (!resp.ok) throw new Error(resp.statusText);
     const data = await resp.json();
     _traces = data.traces || [];
-    _renderTable(data.total || _traces.length);
+    _renderTable(data.total || _traces.length, data.more === true);
   } catch (e) {
     if (body) body.innerHTML = `<p style="color:var(--danger);font-size:13px">failed to load traces: ${esc(e.message)}</p>`;
   }
@@ -118,7 +118,13 @@ function _wireControls() {
     const errEl = document.getElementById('viewer-error');
     if (errEl) errEl.remove();
     try {
-      const data = await fetch('/api/launch-viewer').then(r => r.json());
+      // Carry the tab's active filters into the viewer as pre-filters.
+      const vp = new URLSearchParams();
+      if (_filterRunId) vp.set('run_id', _filterRunId);
+      if (_filterAction) vp.set('action', _filterAction);
+      if (_filterStatus) vp.set('status', _filterStatus);
+      const qs = vp.toString();
+      const data = await fetch('/api/launch-viewer' + (qs ? `?${qs}` : '')).then(r => r.json());
       if (data.ready && data.url) {
         btn.title = data.url;
         window.open(data.url, '_blank', 'noopener');
@@ -146,13 +152,15 @@ function _wireControls() {
 // Table
 // ============================================================
 
-function _renderTable(total) {
+function _renderTable(total, more = false) {
   const shown = _traces.length;
   const subtitle = document.getElementById('traces-subtitle');
   if (subtitle) {
-    subtitle.textContent = shown === total
-      ? `${total} trace${total !== 1 ? 's' : ''}`
-      : `showing ${shown} of ${total} traces`;
+    // `more` means the server hit its result limit — older matches exist
+    // beyond what was returned, but the exact count is unknown.
+    subtitle.textContent = more
+      ? `showing the ${shown} most recent traces (more exist)`
+      : `${total} trace${total !== 1 ? 's' : ''}`;
     if (_filterRunId) subtitle.textContent += ` · run ${_filterRunId}`;
   }
 
