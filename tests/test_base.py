@@ -15,7 +15,10 @@ from core.state import Act, ActType, DialogueState, TokenUsage
 class _FakeAgent(BaseAgent):
     def __init__(self, role="proposition"):
         super().__init__(role=role, nickname="Test", model="gpt-4o",
-                         temperature=0.5, config={})
+                         temperature=0.5, config={},
+                         # Routing is resolved before construction; these
+                         # tests exercise parsing, not provider selection.
+                         provider="openai", endpoint_type="responses")
 
     def _build_prompt(self, state):
         return "system", "user"

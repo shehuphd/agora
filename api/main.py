@@ -80,7 +80,11 @@ app.include_router(experiments_router.router)
 app.include_router(traces_router.router)
 app.include_router(batch_router.router)
 
-# Serve static frontend at root — must be last
+# Serve static frontend at root — must be last.
+# Freshness is handled by NoCacheStaticMiddleware above, which is also why the
+# frontend carries no ?v= cache-busting query strings: they were maintained by
+# hand, drifted out of sync between importers of the same module, and made one
+# module resolve to two URLs (so two instances) depending on who imported it.
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")

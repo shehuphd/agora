@@ -109,23 +109,31 @@ class ModeratorAgent(BaseAgent):
 
     def __init__(self, nickname: str = "Moderator", model: str = "claude-opus-4-8",
                  temperature: float = 0.2, max_turns: int = 15,
-                 token_budget: int = 40_000, config: dict = None):
+                 token_budget: int = 40_000, config: dict = None, provider: str = "",
+                 endpoint_type: str = "default"):
         super().__init__(
             role="moderator",
             nickname=nickname,
             model=model,
             temperature=temperature,
             config=config or {},
+            provider=provider,
+            endpoint_type=endpoint_type,
         )
         self._max_turns = max_turns
         self._token_budget = token_budget
 
     def generate(self, state: DialogueState, should_close: bool = False, closure_reason: str = None) -> Act:
-        """Generate STATUS or CLOSE act based on current state and termination signal."""
+        """Generate STATUS or CLOSE act based on current state and termination signal.
+
+        Bypasses the evidence pool injection that debater agents get. The
+        moderator is a procedural referee — it emits structured STATUS/CLOSE
+        JSON, never cites URLs, and doesn't need the citation contract. Skipping
+        pool injection saves the ~60 tokens/source that were inflating moderator
+        spend for no benefit.
+        """
         system, user = self._build_prompt(state, should_close=should_close, closure_reason=closure_reason)
-        # Route through the pool chokepoint so moderator citations are checked
-        # against the shared evidence pool like every other agent's.
-        return self._compose_with_pool(state, system, user)
+        return self._traced_generate(state, system, user)
 
     def _parse_result(self, raw, state, input_tok, output_tok):
         return self._parse_moderator_response(raw, state, input_tok, output_tok)

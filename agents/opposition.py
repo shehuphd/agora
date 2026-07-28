@@ -144,13 +144,16 @@ class OppositionAgent(BaseAgent):
     def __init__(self, nickname: str = "Antithesis", model: str = "gpt-4o",
                  temperature: float = 0.4, aggression: float = 0.8,
                  min_challenges: int = 2, min_concessions: int = 1,
-                 config: dict = None):
+                 config: dict = None, provider: str = "",
+                 endpoint_type: str = "default"):
         super().__init__(
             role="opposition",
             nickname=nickname,
             model=model,
             temperature=temperature,
             config=config or {},
+            provider=provider,
+            endpoint_type=endpoint_type,
         )
         self._aggression      = aggression
         self._min_challenges  = min_challenges

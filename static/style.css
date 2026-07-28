@@ -344,6 +344,43 @@ a:hover { opacity: 0.8; }
 }
 .dsb-btn-muted:hover { background: var(--surface-2); }
 
+/* Export scope menu — each format button opens a choice of debate or full pack.
+   Expands inline rather than as an overlay: .debate-sidebar is overflow:auto,
+   which clips absolutely-positioned children. In flow it scrolls with the
+   sidebar and can never be cut off. */
+.export-menu { display: flex; flex-direction: column; }
+
+.export-pop {
+  margin-top: 4px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.export-pop[hidden] { display: none; }
+
+.export-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+.export-opt:hover { background: var(--surface-1); }
+.export-opt:disabled { opacity: 0.5; cursor: progress; }
+
+.export-opt-label { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.export-opt-hint  { font-size: 11px; color: var(--text-muted); white-space: normal; }
+
 .dsb-btn-accent {
   background: var(--fill-accent);
   color: var(--on-accent);

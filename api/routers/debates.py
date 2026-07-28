@@ -15,6 +15,7 @@ from api.models import DebateConfig
 from api.routers.settings import _load_config as _load_agora_config
 from core.config import DebateRunConfig
 from core.export import build_markdown as _build_markdown, _n
+from core.runpack import build_run_pack as _build_run_pack, build_pack_markdown as _build_pack_markdown
 from core import runs_db as _runs_db
 
 router = APIRouter()
@@ -27,6 +28,7 @@ _overrides:          dict[str, dict]          = {}   # current effective overrid
 _override_logs:      dict[str, list]          = {}   # ordered log of applied overrides
 
 RUNS_DIR = Path(__file__).parent.parent.parent / "runs"
+TRACES_DIR = Path(__file__).parent.parent.parent / "data" / "traces"
 
 
 def get_queue(run_id: str) -> asyncio.Queue:
@@ -57,6 +59,14 @@ async def create_debate(config: DebateConfig, background_tasks: BackgroundTasks)
 
     run_id = str(uuid.uuid4())
     run_cfg = DebateRunConfig.from_api(config, first_available=first_available)
+
+    # Resolve every role's selection to a concrete (provider, model, endpoint)
+    # here, once, and carry it in the run config. Agents are then handed a
+    # routable address instead of re-deriving one per construction, so the run
+    # records exactly which vendor served it and a later registry change cannot
+    # retroactively point it somewhere else.
+    run_cfg = _resolve_run_models(run_cfg)
+
     run_dir = RUNS_DIR / _make_run_dir_name(run_cfg.topic)
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
@@ -334,7 +344,14 @@ async def get_debate(run_id: str):
 
 
 @router.get("/debates/{run_id}/export")
-async def export_debate(run_id: str, format: str = "json"):
+async def export_debate(run_id: str, format: str = "json", raw_serp: bool = False):
+    """Export one run.
+
+    format: json | markdown       — the transcript
+            pack | pack-markdown  — the full audit record: every call, query,
+                                    source, excerpt, and citation check
+    raw_serp: pack formats only — embed the unabridged SERP responses.
+    """
     with ActionTrace.start(action="run.export", kind="app", actor="user",
                            project="agora", correlation_id=run_id) as t:
         t.input({"run_id": run_id, "format": format, "batch": False})
@@ -342,45 +359,57 @@ async def export_debate(run_id: str, format: str = "json"):
     if not db_path:
         raise HTTPException(status_code=404, detail="Debate not found")
 
-    run_dir  = db_path.parent
-    is_md    = format == "markdown"
-    pre_file = run_dir / ("debate.md" if is_md else "debate.json")
+    run_dir = db_path.parent
 
-    if pre_file.exists():
-        # Serve the pre-generated file — fast path, no DB query needed for content.
-        conn = sqlite3.connect(str(db_path))
-        row  = conn.execute(
-            "SELECT debate_title, topic FROM runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        conn.close()
-        title = (row[0] or row[1] or run_id) if row else run_id
-        slug  = re.sub(r"[^a-z0-9]+", "-", title[:40].lower()).strip("-")
-        ext   = "md" if is_md else "json"
-        media = "text/markdown; charset=utf-8" if is_md else "application/json"
+    if format in ("pack", "pack-markdown"):
+        data = await get_debate(run_id)
+        slug = _slugify(data.get("debate_title") or data.get("topic") or run_id)
+        pack = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _build_run_pack(data, run_dir, TRACES_DIR, include_raw_serp=raw_serp),
+        )
+        if format == "pack-markdown":
+            return Response(
+                content=_build_pack_markdown(pack),
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition":
+                         f'attachment; filename="agora-pack-{slug}-{run_id[:8]}.md"'},
+            )
         return Response(
-            content=pre_file.read_bytes(),
-            media_type=media,
-            headers={"Content-Disposition": f'attachment; filename="agora-{slug}-{run_id[:8]}.{ext}"'},
+            content=_json.dumps(pack, indent=2, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition":
+                     f'attachment; filename="agora-pack-{slug}-{run_id[:8]}.json"'},
         )
 
-    # Fallback: generate on the fly (pre-existing debates without auto-generated files).
-    data = await get_debate(run_id)
-    slug = re.sub(
-        r"[^a-z0-9]+", "-",
-        (data["debate_title"] or data["topic"] or run_id)[:40].lower()
-    ).strip("-")
+    is_md = format == "markdown"
+
+    # debate.json is data, so the copy on disk is served as-is. Markdown is
+    # *rendered* data, and the pre-generated debate.md was written by whichever
+    # renderer existed when the run closed — serving it would freeze every
+    # historical run at that version. Rendering here instead means a fix to
+    # build_markdown reaches runs that closed before the fix existed.
+    pre_json = run_dir / "debate.json"
+    if pre_json.exists():
+        data = _load_json_file(pre_json)
+        if data is None:
+            data = await get_debate(run_id)
+    else:
+        data = await get_debate(run_id)
+
+    slug = _slugify(data.get("debate_title") or data.get("topic") or run_id)
     if is_md:
-        filename = f"agora-{slug}-{run_id[:8]}.md"
         return Response(
             content=_build_markdown(data),
             media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition":
+                     f'attachment; filename="agora-{slug}-{run_id[:8]}.md"'},
         )
-    filename = f"agora-{slug}-{run_id[:8]}.json"
     return Response(
         content=_json.dumps(data, indent=2),
         media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition":
+                 f'attachment; filename="agora-{slug}-{run_id[:8]}.json"'},
     )
 
 
@@ -569,12 +598,58 @@ async def batch_export(body: dict):
 # Helpers
 # ------------------------------------------------------------------
 
+_AGENT_ROLES = ("proposition", "opposition", "moderator", "synthesiser")
+
+
+def _resolve_run_models(run_cfg: "DebateRunConfig") -> "DebateRunConfig":
+    """Pin every role to one registry entry, or fail with a 400 naming the role.
+
+    Runs before the run exists, so an unroutable selection is rejected up front
+    instead of surfacing three turns in as an error from whichever vendor the
+    call was misdirected to.
+    """
+    import dataclasses
+
+    conn = _runs_db.connect()
+    try:
+        resolved, problems = {}, []
+        for role in _AGENT_ROLES:
+            agent = getattr(run_cfg, role)
+            try:
+                entry = _runs_db.resolve_model(conn, agent.model, agent.provider)
+            except _runs_db.ModelNotRoutable as exc:
+                problems.append(f"{role} — {exc}")
+                continue
+            resolved[role] = dataclasses.replace(
+                agent, provider=entry["provider"],
+                endpoint_type=entry["endpoint_type"],
+            )
+    finally:
+        conn.close()
+
+    if problems:
+        raise HTTPException(status_code=400, detail=" | ".join(problems))
+    return dataclasses.replace(run_cfg, **resolved)
+
+
+def _slugify(text: str, limit: int = 40) -> str:
+    """Filename-safe slug for export attachments."""
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "")[:limit].lower()).strip("-")
+
+
+def _load_json_file(path: Path):
+    """Read a JSON file, or None if it is missing or malformed."""
+    try:
+        return _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _make_run_dir_name(topic: str) -> str:
     import string, random
     date_str = datetime.utcnow().strftime("%Y%m%d")
     rand_str = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:30].strip("-")
-    return f"{date_str}_{rand_str}_{slug}"
+    return f"{date_str}_{rand_str}_{_slugify(topic, 30)}"
 
 
 def _find_db(run_id: str) -> Path | None:

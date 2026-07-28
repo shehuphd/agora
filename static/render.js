@@ -348,6 +348,26 @@ export function renderTokenStrip(tok, budget) {
     `${formatTokens(tok.total)} / ${formatTokens(budget)} tokens used`;
 }
 
+// The tracker lives in static markup shared by every debate, so opening a new
+// one inherits whatever the last left behind. Restore every field, not just the
+// ones the next update happens to write.
+export function resetTerminationTracker(maxTurns) {
+  document.getElementById('term-turns').style.width          = '0%';
+  document.getElementById('term-turns-val').textContent      = `0 / ${maxTurns ?? '—'}`;
+  document.getElementById('term-challenges').style.width     = '0%';
+  document.getElementById('term-challenges-val').textContent = '0';
+  document.getElementById('term-rep').style.width            = '0%';
+  _setRepetition(0);
+}
+
+function _setRepetition(count) {
+  const el = document.getElementById('term-rep-val');
+  if (!el) return;
+  el.textContent = count > 0 ? `${count} detected` : 'none';
+  el.classList.toggle('term-val-ok', count === 0);
+  el.style.color = count > 0 ? 'var(--text-warning)' : '';
+}
+
 export function updateTerminationTracker(checks, cfg) {
   const maxTurns = checks.max_turns || cfg.max_turns || 8;
   const turns    = checks.turns_used || 0;
@@ -356,10 +376,7 @@ export function updateTerminationTracker(checks, cfg) {
   document.getElementById('term-turns-val').textContent = `${turns} / ${maxTurns}`;
   document.getElementById('term-challenges-val').textContent =
     checks.outstanding_challenge_count ?? '—';
-  if (checks.repetition_count > 0) {
-    const el = document.getElementById('term-rep-val');
-    el.textContent = `${checks.repetition_count} detected`;
-    el.classList.remove('term-val-ok');
-    el.style.color = 'var(--text-warning)';
-  }
+  // Set on both branches so the row is a function of current state, not of
+  // whether a warning ever fired.
+  _setRepetition(checks.repetition_count || 0);
 }

@@ -1,12 +1,12 @@
 // app.js — SPA entry point: routing, nav, new/confirm/settings screens.
 // Hash-based routing. ES modules — no bundler required.
 
-import { loadHistory, setHistoryPageSize }  from './history.js?v=4';
-import { loadDebate }   from './debate.js?v=4';
-import { loadExperiments } from './experiments.js?v=4';
-import { loadTraces } from './traces.js?v=1';
-import { esc, formatTokens } from './render.js?v=4';
-import { launchOnboarding, maybeAutoLaunch } from './onboarding.js?v=1';
+import { loadHistory, setHistoryPageSize }  from './history.js';
+import { loadDebate }   from './debate.js';
+import { loadExperiments } from './experiments.js';
+import { loadTraces } from './traces.js';
+import { esc, formatTokens } from './render.js';
+import { launchOnboarding, maybeAutoLaunch } from './onboarding.js';
 
 // ============================================================
 // ROUTING
@@ -155,6 +155,19 @@ const _MOD_NAMES  = ['Arbiter', 'Logos', 'Themis', 'Referee', 'Impartial', 'Ment
 function _pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 // Module-level cache — populated on load and after any key test.
+// Separates provider from model id inside a <select> option value. Provider
+// names are plain identifiers, so this never appears in one; model ids may
+// contain ':' and '/', which is why neither is used here. Split on the first
+// occurrence only.
+const MODEL_KEY_SEP = '|';
+
+function splitModelKey(key) {
+  const i = String(key ?? '').indexOf(MODEL_KEY_SEP);
+  return i === -1
+    ? { provider: null, model: key || '' }
+    : { provider: key.slice(0, i), model: key.slice(i + 1) };
+}
+
 let _availableModels = [];
 
 async function _fetchAvailableModels() {
@@ -164,6 +177,12 @@ async function _fetchAvailableModels() {
     const data = await res.json();
     _availableModels = (data.models || []).map(m => ({
       value:    m.model_id,
+      // Identifies the registry row, not just the model. Two providers can
+      // serve one model id, and a <select> option carrying only the id makes
+      // those two choices indistinguishable once the form is submitted.
+      // Purely a DOM transport encoding — it is split back into separate
+      // model and provider fields before anything is sent or stored.
+      key:      `${m.provider}${MODEL_KEY_SEP}${m.model_id}`,
       label:    `${m.provider} ${m.display_name || m.model_id}`,
       provider: m.provider,
     }));
@@ -173,16 +192,14 @@ async function _fetchAvailableModels() {
   }
 }
 
+// Which provider serves this model, per the registry — the only thing that
+// knows, since each row was written by the adapter that enumerated it.
+// Returns null when unregistered rather than guessing from the name: callers
+// use this to name the key at fault, and naming the wrong one is worse than
+// staying quiet.
 function _providerForModel(model) {
   if (!model) return null;
-  // Fast path: check the cached model list first.
-  const found = _availableModels.find(m => m.value === model);
-  if (found) return found.provider;
-  // Fallback: infer from prefix for models not yet in the DB.
-  if (model.startsWith('claude'))  return 'anthropic';
-  if (model.startsWith('gemini'))  return 'google';
-  if (model.startsWith('sonar') || model === 'r1-1776') return 'perplexity';
-  return 'openai';
+  return _availableModels.find(m => m.value === model)?.provider ?? null;
 }
 
 // Exposed so debate.js can check validity without importing app.js (avoids circular dep).
@@ -191,7 +208,8 @@ window._knownModels = new Set();
 
 // allowEmpty: if true, prepend a blank option (value="") and don't auto-select.
 // blankLabel: text for the blank option (default: "— select a model —").
-function _buildModelSelect(sel, keyStatus, selectedValue, allowEmpty = false, blankLabel = '— select a model —') {
+function _buildModelSelect(sel, keyStatus, selectedValue, allowEmpty = false,
+                           blankLabel = '— select a model —', selectedProvider = null) {
   sel.innerHTML = '';
   if (!_availableModels.length) {
     const opt = document.createElement('option');
@@ -213,7 +231,7 @@ function _buildModelSelect(sel, keyStatus, selectedValue, allowEmpty = false, bl
     grp.label = provider;
     models.forEach(m => {
       const opt = document.createElement('option');
-      opt.value = m.value;
+      opt.value = m.key;
       opt.textContent = keyStatus[m.provider] ? m.label : `${m.label} (key missing)`;
       opt.disabled = !keyStatus[m.provider];
       grp.appendChild(opt);
@@ -221,12 +239,20 @@ function _buildModelSelect(sel, keyStatus, selectedValue, allowEmpty = false, bl
     sel.appendChild(grp);
   });
   if (selectedValue) {
-    // Exact match first; prefix fallback for short IDs vs versioned IDs in DB.
-    sel.value = selectedValue;
-    if (!sel.value) {
-      const match = [...sel.options].find(o => o.value.startsWith(selectedValue));
-      if (match) sel.value = match.value;
-    }
+    // selectedValue may be a full "provider|model" key or a bare model id from
+    // an older config. Try the exact key, then the provider-qualified key when
+    // one was supplied, then any provider serving that model, then a prefix
+    // match for short ids against versioned ones in the registry.
+    const want = splitModelKey(selectedValue);
+    const provider = selectedProvider || want.provider;
+    const opts = [...sel.options];
+    const byModel = o => splitModelKey(o.value).model;
+    const match =
+      opts.find(o => o.value === selectedValue) ||
+      (provider && opts.find(o => o.value === `${provider}${MODEL_KEY_SEP}${want.model}`)) ||
+      opts.find(o => byModel(o) === want.model) ||
+      opts.find(o => byModel(o).startsWith(want.model));
+    if (match) sel.value = match.value;
   }
   // Without allowEmpty, auto-select the first enabled option so the field is never blank.
   if (!sel.value && !allowEmpty) {
@@ -433,6 +459,16 @@ async function loadNew() {
     const fd = new FormData(e.target);
     const cfg = Object.fromEntries(fd.entries());
 
+    // The selects carry "provider|model" so the choice of vendor survives the
+    // form. Split it back apart here: the wire format stays structured, and
+    // nothing downstream ever parses a model id.
+    for (const field of ['prop_model', 'opp_model', 'mod_model', 'synth_model']) {
+      if (!cfg[field]) continue;
+      const { provider, model } = splitModelKey(cfg[field]);
+      cfg[field] = model;
+      if (provider) cfg[field.replace('_model', '_provider')] = provider;
+    }
+
     // Flash all missing required fields and abort. This runs even when the button looks incomplete
     // so clicking always gives the user visual feedback about exactly what's missing.
     const _flashEl = (el, eventName = 'input') => {
@@ -559,7 +595,9 @@ async function loadSettings() {
     const data = await res.json();
 
     container.innerHTML = '';
-    const KEY_MAP = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', google: 'GOOGLE_API_KEY', perplexity: 'PERPLEXITY_API_KEY', serper: 'SERPER_API_KEY' };
+    // Sent by /settings, derived from the registered adapters — a new provider
+    // appears here without the frontend being edited.
+    const KEY_MAP = data.key_envs || {};
     const warnings = data.key_warnings || {};
 
     Object.entries(KEY_MAP).forEach(([provider, envName]) => {

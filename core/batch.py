@@ -127,7 +127,7 @@ async def _run_row(job: BatchJob, row: BatchRow) -> None:
         from api.routers.debates import (
             _run_debate_wrapper, _run_queues, _pause_events,
             _force_close_events, _overrides, _override_logs,
-            RUNS_DIR, _make_run_dir_name,
+            _resolve_run_models, RUNS_DIR, _make_run_dir_name,
         )
         from api.routers.settings import _load_config as _load_agora_config
         from core import runs_db as _runs_db
@@ -155,6 +155,10 @@ async def _run_row(job: BatchJob, row: BatchRow) -> None:
         run_id = str(_uuid.uuid4())
         row.run_id = run_id
         run_cfg = DebateRunConfig.from_api(config, first_available=first_available)
+        # Same resolution the API path uses, so a CSV row naming an unroutable
+        # or ambiguous model fails as a row error with a readable reason
+        # instead of constructing an agent with nowhere to send its calls.
+        run_cfg = _resolve_run_models(run_cfg)
         run_dir = RUNS_DIR / _make_run_dir_name(run_cfg.topic)
 
         # Unbounded: no browser SSE client is guaranteed to drain a batch run's

@@ -405,13 +405,39 @@
 
     <div class="dsb-divider"></div>
 
-    <div class="dsb-exports">
-      <button class="dsb-btn dsb-btn-muted" id="btn-export-debate-json">
-        <i class="ti ti-download" aria-hidden="true"></i> JSON
-      </button>
-      <button class="dsb-btn dsb-btn-muted" id="btn-export-debate-md">
-        <i class="ti ti-markdown" aria-hidden="true"></i> .MD
-      </button>
+    <div class="dsb-exports" id="export-menus">
+      <div class="export-menu">
+        <button class="dsb-btn dsb-btn-muted export-trigger"
+                aria-haspopup="menu" aria-expanded="false">
+          <i class="ti ti-download" aria-hidden="true"></i> JSON
+        </button>
+        <div class="export-pop" role="menu" hidden>
+          <button class="export-opt" role="menuitem" data-format="json">
+            <span class="export-opt-label">this debate</span>
+            <span class="export-opt-hint">transcript, acts, and claims</span>
+          </button>
+          <button class="export-opt" role="menuitem" data-format="pack">
+            <span class="export-opt-label">full pack</span>
+            <span class="export-opt-hint">every call, source, excerpt, and citation check</span>
+          </button>
+        </div>
+      </div>
+      <div class="export-menu">
+        <button class="dsb-btn dsb-btn-muted export-trigger"
+                aria-haspopup="menu" aria-expanded="false">
+          <i class="ti ti-markdown" aria-hidden="true"></i> .MD
+        </button>
+        <div class="export-pop" role="menu" hidden>
+          <button class="export-opt" role="menuitem" data-format="markdown">
+            <span class="export-opt-label">this debate</span>
+            <span class="export-opt-hint">readable transcript</span>
+          </button>
+          <button class="export-opt" role="menuitem" data-format="pack-markdown">
+            <span class="export-opt-label">full pack</span>
+            <span class="export-opt-hint">every call, source, excerpt, and citation check</span>
+          </button>
+        </div>
+      </div>
     </div>
 
   </div><!-- /debate-sidebar -->
@@ -714,6 +740,6 @@
   </div>
 </main>
 
-<script type="module" src="/app.js?v=4"></script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

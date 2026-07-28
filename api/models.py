@@ -21,6 +21,14 @@ class DebateConfig(BaseModel):
     proposition_model: Optional[str] = None
     opposition_model: Optional[str] = None
     moderator_model: Optional[str] = None
+    # Which vendor serves each model. Optional: only needed when more than one
+    # provider offers the same model id (a model bought direct and the same
+    # model resold by an aggregator are different endpoints, keys, and prices).
+    # Omitted means "resolve it, and tell me if it's ambiguous".
+    proposition_provider: Optional[str] = None
+    opposition_provider: Optional[str] = None
+    moderator_provider: Optional[str] = None
+    synthesiser_provider: Optional[str] = None
     proposition_nickname: str = "Thesis"
     opposition_nickname: str = "Antithesis"
     temperature_proposition: float = 0.7
@@ -32,6 +40,10 @@ class DebateConfig(BaseModel):
     opp_model: Optional[str] = None
     mod_model: Optional[str] = None
     synth_model: Optional[str] = None
+    prop_provider: Optional[str] = None
+    opp_provider: Optional[str] = None
+    mod_provider: Optional[str] = None
+    synth_provider: Optional[str] = None
     prop_nickname: Optional[str] = None
     opp_nickname: Optional[str] = None
     prop_temperature: Optional[float] = None

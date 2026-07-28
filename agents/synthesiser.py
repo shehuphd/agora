@@ -75,13 +75,16 @@ class SynthesiserAgent(BaseAgent):
     """Activated after CLOSE. Reads full act log and produces structured argument map."""
 
     def __init__(self, nickname: str = "Synthesis", model: str = "claude-sonnet-4-6",
-                 temperature: float = 0.3, config: dict = None):
+                 temperature: float = 0.3, config: dict = None, provider: str = "",
+                 endpoint_type: str = "default"):
         super().__init__(
             role="synthesiser",
             nickname=nickname,
             model=model,
             temperature=temperature,
             config=config or {},
+            provider=provider,
+            endpoint_type=endpoint_type,
         )
 
     def _parse_result(self, raw, state, input_tok, output_tok):

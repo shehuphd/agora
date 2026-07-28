@@ -24,6 +24,27 @@ from agents.base import QuotaExhaustedError
 _WARNINGS_PATH = Path(__file__).parent.parent / "config" / "key_warnings.json"
 
 
+def _retire_unknown_model(agent, exc: Exception) -> None:
+    """Retire a model the provider says does not exist, so it stops being offered.
+
+    Only fires on the provider's own "unknown model" verdict — never on rate
+    limits, auth, or transient failures, which say nothing about whether the
+    model is real.
+    """
+    low = str(exc).lower()
+    if not ("model_not_found" in low or "invalid model" in low
+            or "does not exist" in low or "invalid_model" in low):
+        return
+    try:
+        idx = _runs_db.connect()
+        _runs_db.mark_model_unservable(idx, agent._provider, agent.model)
+        idx.close()
+        print(f"[models] retired {agent._provider}/{agent.model} — provider "
+              f"reports it does not exist", flush=True)
+    except Exception as e:
+        print(f"[models] could not retire {agent.model}: {e}", flush=True)
+
+
 def _write_quota_warning(provider: str) -> None:
     """Persist a quota-exhaustion timestamp for the given provider."""
     try:
@@ -219,6 +240,8 @@ async def _run_debate_inner(
     proposition = PropositionAgent(
         nickname=config.proposition.nickname,
         model=config.proposition.model,
+        provider=config.proposition.provider,
+        endpoint_type=config.proposition.endpoint_type,
         temperature=config.proposition.temperature,
         config={},
     )
@@ -229,6 +252,8 @@ async def _run_debate_inner(
         aggression=config.opposition.aggression,
         min_challenges=config.protocol.min_challenges,
         min_concessions=config.protocol.min_concessions,
+        provider=config.opposition.provider,
+        endpoint_type=config.opposition.endpoint_type,
         config={},
     )
     moderator = ModeratorAgent(
@@ -237,10 +262,14 @@ async def _run_debate_inner(
         temperature=config.moderator.temperature,
         max_turns=config.protocol.max_turns,
         token_budget=config.protocol.token_budget,
+        provider=config.moderator.provider,
+        endpoint_type=config.moderator.endpoint_type,
         config={},
     )
     synthesiser = SynthesiserAgent(
         model=config.synthesiser.model,
+        provider=config.synthesiser.provider,
+        endpoint_type=config.synthesiser.endpoint_type,
         temperature=config.synthesiser.temperature,
         config={},
     )
@@ -314,6 +343,9 @@ class TurnOrchestrator:
         self._loop = asyncio.get_running_loop()
         self._turn_idx_start = turn_idx_start
         self._continued_from = continued_from
+        # Set when a run stops on a failure rather than a protocol
+        # termination, so the final status reflects that.
+        self._failed = False
 
     def _effective_token_budget(self) -> int:
         return self._overrides.get("token_budget", self.config.protocol.token_budget)
@@ -394,17 +426,22 @@ class TurnOrchestrator:
                         act = await self._call(agent.generate, self.state)
                         validate_act(self.state, act.act_type)
                     except asyncio.TimeoutError:
-                        turn_trace.step(f"timeout: {agent.role} after 90s")
+                        turn_trace.step(f"timeout: {agent.role} after {_AGENT_TIMEOUT:.0f}s")
                         turn_trace.output({"error": "timeout", "agent_role": agent.role})
+                        self._failed = True
+                        self.state.closure_reason = f"timeout_{agent.role}"
                         await self.event_queue.put({
                             "type": "error",
-                            "message": "Agent timed out (90 s) — the AI provider may be overloaded. Try again.",
+                            "message": f"{agent.role} ({agent.model}) timed out after "
+                                       f"{_AGENT_TIMEOUT:.0f}s — the provider may be "
+                                       f"overloaded. The debate has stopped; you can rerun it.",
                         })
                         break
                     except QuotaExhaustedError as e:
                         turn_trace.step(f"quota_exhausted: {e.provider}")
                         turn_trace.output({"error": "quota_exhausted", "provider": e.provider})
                         _write_quota_warning(e.provider)
+                        self._failed = True
                         self.state.closure_reason = f"quota_exhausted_{e.provider}"
                         await self.event_queue.put({"type": "error", "message": _friendly_quota_error(e.provider)})
                         break
@@ -412,6 +449,11 @@ class TurnOrchestrator:
                         turn_trace.step(f"agent_error: {type(e).__name__}")
                         turn_trace.output({"error": str(e), "agent_role": agent.role})
                         print(f"[runner] {agent.role.upper()} ERROR ({agent.model}): {e}\n{traceback.format_exc()}", flush=True)
+                        _retire_unknown_model(agent, e)
+                        # Recorded so history and the run pack can say why the
+                        # run stopped, rather than only that it did.
+                        self._failed = True
+                        self.state.closure_reason = f"{agent.role}_error"
                         label = f"{agent.role} ({agent.model}): "
                         await self.event_queue.put({"type": "error", "message": label + _friendly_error(e)})
                         break
@@ -465,16 +507,19 @@ class TurnOrchestrator:
                             "message": f"Moderator: {_friendly_quota_error(e.provider)}",
                         })
                         should_close = True
+                        self._failed = True
                         if not self.state.closure_reason:
                             self.state.closure_reason = f"quota_exhausted_{e.provider}"
                     except Exception as e:
                         turn_trace.step(f"moderator_error: {type(e).__name__}")
                         print(f"[runner] MODERATOR ERROR: {e}\n{traceback.format_exc()}", flush=True)
+                        _retire_unknown_model(self.moderator, e)
                         await self.event_queue.put({
                             "type": "error",
                             "message": f"moderator ({self.moderator.model}): {_friendly_error(e)}",
                         })
                         should_close = True
+                        self._failed = True
                         if not self.state.closure_reason:
                             self.state.closure_reason = "moderator_error"
 
@@ -517,7 +562,12 @@ class TurnOrchestrator:
                 turn_idx += 1
 
         finally:
-            status = "closed" if self.state.closure_reason else "error"
+            # A run that stopped on a failure is not a clean close, even though
+            # it records a reason. Reason and outcome are tracked separately so
+            # a failure can say why without being filed as a normal ending.
+            status = "error" if self._failed else (
+                "closed" if self.state.closure_reason else "error"
+            )
             try:
                 self.conn.execute(
                     "UPDATE runs SET status=?, closure_reason=? WHERE run_id=?",

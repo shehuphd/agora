@@ -73,13 +73,16 @@ class PropositionAgent(BaseAgent):
     RETRIEVES = True   # gathers evidence into the shared pool
 
     def __init__(self, nickname: str = "Thesis", model: str = "claude-sonnet-4-6",
-                 temperature: float = 0.7, config: dict = None):
+                 temperature: float = 0.7, config: dict = None, provider: str = "",
+                 endpoint_type: str = "default"):
         super().__init__(
             role="proposition",
             nickname=nickname,
             model=model,
             temperature=temperature,
             config=config or {},
+            provider=provider,
+            endpoint_type=endpoint_type,
         )
 
     def _build_prompt(self, state: DialogueState) -> tuple[str, str]:

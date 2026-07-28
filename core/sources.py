@@ -139,6 +139,8 @@ class SourcePool:
                 line += f"  ({s.published})"
             if s.snippet:
                 line += f"\n    {s.snippet[:200]}"
+            if s.excerpt:
+                line += f"\n    ---\n    {s.excerpt[:600]}"
             lines.append(line)
         footer = (
             f"\n({omitted} earlier source(s) omitted from this view but still "

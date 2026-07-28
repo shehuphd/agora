@@ -15,6 +15,14 @@ class AgentRunConfig:
     temperature: float
     nickname: str
     aggression: float = 0.8  # only meaningful for opposition
+    # Who serves this model and over which endpoint. Resolved once against the
+    # provider_models registry when the debate is created, then carried for the
+    # life of the run. A model id alone is not a routable address: the same id
+    # can be served by several providers (kimi-k3 direct from Moonshot and
+    # resold by Perplexity are different endpoints, keys, and prices), so the
+    # provider is part of the selection, not something to re-derive later.
+    provider: str | None = None
+    endpoint_type: str = "default"
 
 
 @dataclass(frozen=True)
@@ -65,22 +73,26 @@ class DebateRunConfig:
             debate_title=getattr(c, "debate_title", None) or f"Debate: {c.topic[:60]}",
             proposition=AgentRunConfig(
                 model=_pick("prop_model",     "proposition_model",     first_available),
+                provider=_pick("prop_provider", "proposition_provider", None),
                 temperature=_pick("prop_temperature", "temperature_proposition", 0.7),
                 nickname=_pick("prop_nickname", "proposition_nickname", "Thesis"),
             ),
             opposition=AgentRunConfig(
                 model=_pick("opp_model",     "opposition_model",     first_available),
+                provider=_pick("opp_provider", "opposition_provider", None),
                 temperature=_pick("opp_temperature", "temperature_opposition", 0.4),
                 nickname=_pick("opp_nickname", "opposition_nickname", "Antithesis"),
                 aggression=_pick("opp_aggression", "aggression", 0.8),
             ),
             moderator=AgentRunConfig(
                 model=_pick("mod_model", "moderator_model", first_available),
+                provider=_pick("mod_provider", "moderator_provider", None),
                 temperature=getattr(c, "temperature_moderator", 0.3),
                 nickname="Moderator",
             ),
             synthesiser=AgentRunConfig(
                 model=_pick("synth_model", "synthesiser_model", first_available),
+                provider=_pick("synth_provider", "synthesiser_provider", None),
                 temperature=getattr(c, "temperature_synthesiser", 0.3),
                 nickname="Synthesis",
             ),
@@ -116,22 +128,30 @@ class DebateRunConfig:
             debate_title=d.get("debate_title", f"Debate: {d['topic'][:60]}"),
             proposition=AgentRunConfig(
                 model=d.get("proposition_model") or None,
+                provider=d.get("proposition_provider") or None,
+                endpoint_type=d.get("proposition_endpoint_type") or "default",
                 temperature=d.get("temperature_proposition", 0.7),
                 nickname=d.get("proposition_nickname", "Thesis"),
             ),
             opposition=AgentRunConfig(
                 model=d.get("opposition_model") or None,
+                provider=d.get("opposition_provider") or None,
+                endpoint_type=d.get("opposition_endpoint_type") or "default",
                 temperature=d.get("temperature_opposition", 0.4),
                 nickname=d.get("opposition_nickname", "Antithesis"),
                 aggression=d.get("aggression", 0.8),
             ),
             moderator=AgentRunConfig(
                 model=d.get("moderator_model") or None,
+                provider=d.get("moderator_provider") or None,
+                endpoint_type=d.get("moderator_endpoint_type") or "default",
                 temperature=d.get("temperature_moderator", 0.3),
                 nickname="Moderator",
             ),
             synthesiser=AgentRunConfig(
                 model=d.get("synthesiser_model") or None,
+                provider=d.get("synthesiser_provider") or None,
+                endpoint_type=d.get("synthesiser_endpoint_type") or "default",
                 temperature=d.get("temperature_synthesiser", 0.3),
                 nickname="Synthesis",
             ),
@@ -147,8 +167,13 @@ class DebateRunConfig:
         )
 
     def to_json(self) -> str:
-        """Serialise for storage in the sessions.config column."""
-        return json.dumps({
+        """Serialise for storage in the sessions.config column.
+
+        Records the resolved provider and endpoint alongside each model, so the
+        run says exactly which vendor served it. Re-deriving that later from the
+        registry would give a different answer once the registry changes.
+        """
+        payload = {
             "topic": self.topic,
             "debate_title": self.debate_title,
             "proposition_model": self.proposition.model,
@@ -176,4 +201,9 @@ class DebateRunConfig:
                 "min_challenges": self.protocol.min_challenges,
                 "repetition_tolerance": self.protocol.repetition_tolerance,
             },
-        })
+        }
+        for role in ("proposition", "opposition", "moderator", "synthesiser"):
+            agent = getattr(self, role)
+            payload[f"{role}_provider"] = agent.provider
+            payload[f"{role}_endpoint_type"] = agent.endpoint_type
+        return json.dumps(payload)

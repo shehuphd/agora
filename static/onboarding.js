@@ -9,6 +9,7 @@ const _LLM_PROVIDERS = [
   ['openai',     'OPENAI_API_KEY',     'platform.openai.com'],
   ['google',     'GOOGLE_API_KEY',     'aistudio.google.com'],
   ['perplexity', 'PERPLEXITY_API_KEY', 'perplexity.ai/settings/api'],
+  ['moonshot',   'MOONSHOT_API_KEY',   'platform.moonshot.ai/console/api-keys'],
 ];
 
 const _SEARXNG_CMDS = [
@@ -140,10 +141,12 @@ function _wireKeyRows(body, refresh) {
 
 async function _renderSearchStep(overlay, body, foot) {
   let status = { tier: 'provider', neutral: false };
-  let serperInfo = null;
+  let serperInfo = null, braveInfo = null;
   try {
     status = await (await fetch('/api/search-status')).json();
-    serperInfo = ((await (await fetch('/settings')).json()).key_info || {}).serper;
+    const keyInfo = (await (await fetch('/settings')).json()).key_info || {};
+    serperInfo = keyInfo.serper;
+    braveInfo = keyInfo.brave;
   } catch (_) {}
 
   const tierHtml = status.neutral
@@ -159,7 +162,22 @@ async function _renderSearchStep(overlay, body, foot) {
     ${tierHtml}
 
     <div class="ob-search-option">
-      <span class="ob-search-label">option 1 — serper <span class="field-hint">(~$1 per 1k searches)</span></span>
+      <span class="ob-search-label">option 1 — Brave Search <span class="field-hint">(~$1 per 1k searches)</span></span>
+      <div class="ob-key-row" data-provider="brave">
+        <div class="ob-key-meta">
+          <span class="key-name">BRAVE_API_KEY</span>
+          <a class="ob-key-site" href="https://brave.com/search/api/" target="_blank" rel="noopener">brave.com/search/api</a>
+        </div>
+        ${braveInfo?.valid
+          ? '<span class="key-status-ok"><i class="ti ti-check" aria-hidden="true"></i> valid</span>'
+          : '<span class="key-status-missing"><i class="ti ti-minus" aria-hidden="true"></i> missing</span>'}
+        <input type="password" class="ob-key-input" placeholder="paste key…" autocomplete="off">
+        <button class="btn-solid btn-sm ob-key-save">save</button>
+      </div>
+    </div>
+
+    <div class="ob-search-option">
+      <span class="ob-search-label">option 2 — Serper <span class="field-hint">(~$1 per 1k searches)</span></span>
       <div class="ob-key-row" data-provider="serper">
         <div class="ob-key-meta">
           <span class="key-name">SERPER_API_KEY</span>
@@ -174,7 +192,7 @@ async function _renderSearchStep(overlay, body, foot) {
     </div>
 
     <div class="ob-search-option">
-      <span class="ob-search-label">option 2 — SearXNG <span class="field-hint">(free, self-hosted)</span></span>
+      <span class="ob-search-label">option 3 — SearXNG <span class="field-hint">(free, self-hosted)</span></span>
       <div class="ob-cmd-wrap">
         <pre class="ob-cmd"><code>${esc(_SEARXNG_CMDS)}</code></pre>
         <button class="btn-ghost btn-sm ob-copy" title="copy all"><i class="ti ti-copy" aria-hidden="true"></i></button>

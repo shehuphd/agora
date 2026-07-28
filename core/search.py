@@ -7,8 +7,9 @@ service at flat per-query cost, outside the token economy entirely.
 
 Fallback chain, best to worst:
   1. SearXNG   — self-hosted, zero marginal cost, no vendor
-  2. Serper    — flat ~$1/1k queries (SERPER_API_KEY)
-  3. (caller)  — provider research(), token-billed; the caller warns the user
+  2. Brave     — flat ~$1/1k queries (BRAVE_API_KEY)
+  3. Serper    — flat ~$1/1k queries (SERPER_API_KEY)
+  4. (caller)  — provider research(), token-billed; the caller warns the user
 
 Every raw response is appended to <run_dir>/search_log.jsonl — the evidence
 lockfile that makes a run auditable and, later, replayable.
@@ -25,6 +26,7 @@ from pathlib import Path
 from providers.base import RetrievedSource
 
 _SEARXNG_DEFAULT = "http://127.0.0.1:8888"
+_BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 _SERPER_URL = "https://google.serper.dev/search"
 
 # SearXNG availability is probed once and cached; a dead local instance must
@@ -54,6 +56,10 @@ def searxng_available(force: bool = False) -> bool:
         return _searxng_ok
 
 
+def brave_available() -> bool:
+    return bool((os.environ.get("BRAVE_API_KEY") or "").strip())
+
+
 def serper_available() -> bool:
     return bool((os.environ.get("SERPER_API_KEY") or "").strip())
 
@@ -61,11 +67,13 @@ def serper_available() -> bool:
 def active_tier() -> str:
     """Which rung of the chain will answer the next search.
 
-    'searxng' | 'serper' | 'provider' — 'provider' means token-billed
-    vendor search, the thing the user should be warned about.
+    'searxng' | 'brave' | 'serper' | 'provider' — 'provider' means
+    token-billed vendor search, the thing the user should be warned about.
     """
     if searxng_available():
         return "searxng"
+    if brave_available():
+        return "brave"
     if serper_available():
         return "serper"
     return "provider"
@@ -88,6 +96,32 @@ def _search_searxng(query: str, max_results: int) -> tuple[list[RetrievedSource]
             published=str(res.get("publishedDate") or "")[:40],
         )
         for res in (data.get("results") or [])[:max_results]
+        if res.get("url")
+    ]
+    return sources, data
+
+
+def _search_brave(query: str, max_results: int) -> tuple[list[RetrievedSource], dict]:
+    import httpx
+    r = httpx.get(
+        _BRAVE_URL,
+        headers={
+            "X-Subscription-Token": os.environ["BRAVE_API_KEY"].strip(),
+            "Accept": "application/json",
+        },
+        params={"q": query, "count": min(max_results, 20)},
+        timeout=10.0,
+    )
+    r.raise_for_status()
+    data = r.json()
+    sources = [
+        RetrievedSource(
+            url=res.get("url") or "",
+            title=str(res.get("title") or "")[:200],
+            snippet=str(res.get("description") or "")[:300],
+            published=str(res.get("age") or res.get("page_age") or "")[:40],
+        )
+        for res in (data.get("web", {}).get("results") or [])[:max_results]
         if res.get("url")
     ]
     return sources, data
@@ -153,6 +187,13 @@ def search(query: str, max_results: int = 8, run_dir: Path | None = None) -> tup
             return "searxng", sources
         except Exception as exc:
             print(f"[search] searxng failed: {exc}", flush=True)
+    if brave_available():
+        try:
+            sources, raw = _search_brave(query, max_results)
+            _record(run_dir, "brave", query, raw, len(sources))
+            return "brave", sources
+        except Exception as exc:
+            print(f"[search] brave failed: {exc}", flush=True)
     if serper_available():
         try:
             sources, raw = _search_serper(query, max_results)
@@ -182,21 +223,31 @@ def fetch_page_markdown(url: str, max_chars: int = 1500) -> str:
             include_comments=False,
         ) or ""
         return text[:max_chars]
-    except Exception:
+    except Exception as exc:
+        print(f"[search] trafilatura error for {url[:60]}: {exc}", flush=True)
         return ""
 
 
-def enrich_sources(sources: list[RetrievedSource], top_k: int = 2, max_chars: int = 1500) -> None:
-    """Fetch page content for the top_k results, in place, concurrently.
+def enrich_sources(sources: list[RetrievedSource], sample_k: int = 2,
+                   sample_from: int = 5, max_chars: int = 1500) -> None:
+    """Fetch page content for a random sample of the top results, in place.
 
-    Fills `excerpt` (markdown) on each enriched source. Bounded: two pages,
-    capped chars, best-effort.
+    Picks `sample_k` sources at random from the first `sample_from` results.
+    Randomising avoids position bias (always enriching slots 0-1) while staying
+    cheap. Fills `excerpt` (markdown) on each enriched source. Bounded,
+    concurrent, best-effort.
     """
+    import random
     from concurrent.futures import ThreadPoolExecutor
-    targets = sources[:top_k]
-    if not targets:
+    candidates = sources[:sample_from]
+    if not candidates:
         return
+    targets = random.sample(candidates, min(sample_k, len(candidates)))
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
         excerpts = list(pool.map(lambda s: fetch_page_markdown(s.url, max_chars), targets))
+    enriched = 0
     for s, ex in zip(targets, excerpts):
         s.excerpt = ex
+        if ex:
+            enriched += 1
+    print(f"[search] enrich: {enriched}/{len(targets)} pages yielded content", flush=True)

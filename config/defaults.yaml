@@ -39,5 +39,6 @@ providers:
   - anthropic
   - google
   - perplexity
+  - moonshot
 ui:
   history_page_size: 50

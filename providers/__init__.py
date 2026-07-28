@@ -21,6 +21,7 @@ from providers.anthropic import AnthropicAdapter
 from providers.openai import OpenAIAdapter
 from providers.google import GoogleAdapter
 from providers.perplexity import PerplexityAdapter
+from providers.moonshot import MoonshotAdapter
 
 __all__ = [
     "ModelInfo", "QuotaExhaustedError", "RetrievedSource",
@@ -34,6 +35,7 @@ _REGISTRY: dict[str, ProviderAdapter] = {
     "openai":     OpenAIAdapter(),
     "google":     GoogleAdapter(),
     "perplexity": PerplexityAdapter(),
+    "moonshot":   MoonshotAdapter(),
 }
 
 # Limit concurrent outbound calls per provider (protects against accidental thundering herd

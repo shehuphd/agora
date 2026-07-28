@@ -4,7 +4,7 @@ import {
   esc, formatTokens, triggerDownload,
   appendActBubble, appendIntroBubble, appendErrorBubble, appendSystemBubble, appendModelWarningBubble,
   showThinkingBubble, removeThinkingBubble, markDebateClosed,
-  renderTokenStrip, updateTerminationTracker,
+  renderTokenStrip, updateTerminationTracker, resetTerminationTracker,
 } from './render.js';
 
 // Module-level state for the active debate session.
@@ -109,20 +109,7 @@ export async function loadDebate(runId) {
   _wireEndButton(runId);
   _wireOverridePanel(runId);
 
-  const exportJsonBtn = document.getElementById('btn-export-debate-json');
-  if (exportJsonBtn) {
-    exportJsonBtn.onclick = async () => {
-      const res = await fetch(`/debates/${runId}/export?format=json`);
-      triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
-    };
-  }
-  const exportMdBtn = document.getElementById('btn-export-debate-md');
-  if (exportMdBtn) {
-    exportMdBtn.onclick = async () => {
-      const res = await fetch(`/debates/${runId}/export?format=markdown`);
-      triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
-    };
-  }
+  _wireExportMenus(runId);
 
   try {
     const res = await fetch(`/debates/${runId}`);
@@ -136,10 +123,7 @@ export async function loadDebate(runId) {
         debateTok  = { ...data.token_offset };
       }
       _renderDebateChips(debateCfg, data.experiment_name);
-      if (debateCfg.max_turns) {
-        const tv = document.getElementById('term-turns-val');
-        if (tv) tv.textContent = `0 / ${debateCfg.max_turns}`;
-      }
+      resetTerminationTracker(debateCfg.max_turns);
       let _lastTurn = null;
       (data.acts || []).forEach(act => {
         appendActBubble(act);
@@ -390,6 +374,66 @@ function _setPauseButtonState(paused) {
     if (label) label.textContent = 'pause';
     btn.classList.remove('dsb-paused');
     btn.classList.remove('btn-paused');
+  }
+}
+
+let _exportMenuGlobalsWired = false;
+
+// Each format button opens a menu offering this debate or the full pack.
+// The pack assembles acts, sources, search log, and traces on demand, so it
+// can take a moment on a long run — the option reports that itself.
+function _wireExportMenus(runId) {
+  const root = document.getElementById('export-menus');
+  if (!root) return;
+
+  const closeAll = (except) => {
+    root.querySelectorAll('.export-menu').forEach(menu => {
+      if (menu === except) return;
+      menu.querySelector('.export-pop').hidden = true;
+      menu.querySelector('.export-trigger').setAttribute('aria-expanded', 'false');
+    });
+  };
+
+  root.querySelectorAll('.export-menu').forEach(menu => {
+    const trigger = menu.querySelector('.export-trigger');
+    const pop     = menu.querySelector('.export-pop');
+
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      const open = pop.hidden;
+      closeAll(menu);
+      pop.hidden = !open;
+      trigger.setAttribute('aria-expanded', String(open));
+    };
+
+    pop.querySelectorAll('.export-opt').forEach(opt => {
+      opt.onclick = async (e) => {
+        e.stopPropagation();
+        const label = opt.querySelector('.export-opt-label');
+        const was   = label.textContent;
+        opt.disabled = true;
+        label.textContent = 'building…';
+        try {
+          const res = await fetch(`/debates/${runId}/export?format=${opt.dataset.format}`);
+          if (!res.ok) throw new Error(`export failed (${res.status})`);
+          triggerDownload(await res.blob(), res.headers.get('Content-Disposition'));
+          closeAll();
+        } catch (err) {
+          appendSystemBubble('ti-alert-triangle', `Export failed: ${err.message}`);
+        } finally {
+          opt.disabled = false;
+          label.textContent = was;
+        }
+      };
+    });
+  });
+
+  // Registered once per page, not per loadDebate, or revisiting a run would
+  // stack duplicate listeners on document.
+  if (!_exportMenuGlobalsWired) {
+    document.addEventListener('click', () => closeAll());
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(); });
+    _exportMenuGlobalsWired = true;
   }
 }
 

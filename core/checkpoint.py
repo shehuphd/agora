@@ -167,59 +167,21 @@ def write_state_json(state: DialogueState, run_dir: Path) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
-def append_act_to_markdown(act: Act, run_dir: Path) -> None:
-    """Append a single act as a Markdown block to debate.md in the run directory."""
-    path = run_dir / "debate.md"
-    lines = [
-        f"\n### [{act.act_type}] Turn {act.turn} — {act.agent} ({act.agent_role})",
-        f"*{act.timestamp}*  |  `{act.model_used}`  |  "
-        f"tokens: {act.input_tokens}↑ {act.output_tokens}↓",
-        "",
-        act.content,
-    ]
-    if act.reason:
-        lines += ["", f"> **Reason:** {act.reason}"]
-    lines.append("")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-
-def export_markdown(state: DialogueState, run_dir: Path) -> None:
-    """Write a complete Markdown transcript of the debate to debate.md."""
-    path = run_dir / "debate.md"
-    header = [
-        f"# {state.debate_title}",
-        "",
-        f"**Topic:** {state.topic}",
-        f"**Run:** `{state.run_id}`",
-        f"**Started:** {state.created_at}",
-        f"**Closed:** {state.closed_at or 'ongoing'}",
-        f"**Closure reason:** {state.closure_reason or '—'}",
-        "",
-        "## Claims",
-        "",
-    ]
-    for claim in state.claims.values():
-        header.append(f"- `[{claim.claim_id}]` **{claim.status.upper()}** ({claim.author}): {claim.content}")
-    header += ["", "## Act Log", ""]
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(header))
-
-    for act in state.acts:
-        append_act_to_markdown(act, run_dir)
-
-
 # ---------------------------------------------------------------------------
 # Composite checkpoint
 # ---------------------------------------------------------------------------
 
 def checkpoint(conn: sqlite3.Connection, state: DialogueState, act: Act, run_dir: Path) -> None:
-    """Persist act, update claim statuses, write state.json, debate.json, and debate.md."""
+    """Persist act, update claim statuses, write state.json and debate.json.
+
+    No Markdown is written. Markdown is rendered on demand by the export
+    endpoint, so a run never carries a transcript frozen at the renderer
+    version that happened to be current when it closed.
+    """
     write_act_to_db(conn, act)
     update_claim_statuses(conn, state)
     write_state_json(state, run_dir)
-    write_debate_files(state, run_dir)  # rewrites debate.json + debate.md from full state
+    write_debate_files(state, run_dir)
 
 
 # ---------------------------------------------------------------------------

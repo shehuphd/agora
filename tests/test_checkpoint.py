@@ -13,8 +13,7 @@ from core.checkpoint import (
     write_act_to_db,
     update_claim_statuses,
     write_state_json,
-    append_act_to_markdown,
-    export_markdown,
+    checkpoint,
 )
 
 
@@ -214,50 +213,35 @@ def test_write_state_json_overwrite():
         assert data["turn"] == 99
 
 
-def test_append_act_to_markdown():
-    """append_act_to_markdown must create debate.md and include act content."""
+def test_checkpoint_writes_state_and_debate_json():
+    """A checkpoint persists the act plus both JSON files."""
     with tempfile.TemporaryDirectory() as tmpdir:
         run_dir = Path(tmpdir)
-        act = _make_act()
-        append_act_to_markdown(act, run_dir)
-
-        md_path = run_dir / "debate.md"
-        assert md_path.exists()
-        content = md_path.read_text()
-        assert "ASSERT" in content
-        assert "AI will fundamentally transform" in content
-        assert "Thesis" in content
-
-
-def test_append_act_to_markdown_is_cumulative():
-    """Multiple append calls must accumulate content, not overwrite."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        run_dir = Path(tmpdir)
-        act1 = _make_act()
-        act2 = _make_act()
-        act2.act_id = "act-002"
-        act2.act_type = "CHALLENGE"
-        act2.content = "This claim lacks empirical support."
-        act2.agent = "Antithesis"
-
-        append_act_to_markdown(act1, run_dir)
-        append_act_to_markdown(act2, run_dir)
-
-        content = (run_dir / "debate.md").read_text()
-        assert "ASSERT" in content
-        assert "CHALLENGE" in content
-        assert "empirical support" in content
-
-
-def test_export_markdown_full():
-    """export_markdown must create debate.md with header, claims, and act log."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        run_dir = Path(tmpdir)
+        conn = _conn()
+        init_db(conn)
         state = _make_state()
-        export_markdown(state, run_dir)
+        checkpoint(conn, state, _make_act(), run_dir)
 
-        content = (run_dir / "debate.md").read_text()
-        assert "Test Debate" in content
-        assert "AI economics" in content
-        assert "AI will fundamentally transform" in content
-        assert "ASSERT" in content
+        assert (run_dir / "state.json").exists()
+        assert (run_dir / "debate.json").exists()
+        data = json.loads((run_dir / "debate.json").read_text())
+        assert data["topic"] == state.topic
+        assert any(a["act_type"] == "ASSERT" for a in data["acts"])
+        conn.close()
+
+
+def test_checkpoint_writes_no_markdown():
+    """Markdown is rendered on demand at export, never persisted per-run.
+
+    Persisting it would freeze each run's transcript at whichever renderer was
+    current when it closed, so later fixes to build_markdown could not reach it.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        run_dir = Path(tmpdir)
+        conn = _conn()
+        init_db(conn)
+        checkpoint(conn, _make_state(), _make_act(), run_dir)
+
+        assert not (run_dir / "debate.md").exists()
+        assert not list(run_dir.glob("*.md"))
+        conn.close()

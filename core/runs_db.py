@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS provider_models (
     display_name  TEXT,
     endpoint_type TEXT DEFAULT 'default',
     is_active     INTEGER DEFAULT 1,
+    -- Set when the provider's inference endpoint rejected the model as
+    -- unknown, even though its own listing advertises it. Distinct from
+    -- is_active, which tracks whether the listing still contains the model:
+    -- a re-sync must not resurrect something we have proof cannot be called.
+    unservable    INTEGER DEFAULT 0,
     last_updated  TEXT,
     PRIMARY KEY (provider, model_id)
 );
@@ -71,6 +76,14 @@ def connect() -> sqlite3.Connection:
 
 def init(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
+    # Additive migrations for databases created before a column existed.
+    for stmt in (
+        "ALTER TABLE provider_models ADD COLUMN unservable INTEGER DEFAULT 0",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # already present
     conn.commit()
 
 
@@ -299,7 +312,9 @@ def upsert_provider_models(conn: sqlite3.Connection, provider: str, models: list
                ON CONFLICT(provider, model_id) DO UPDATE SET
                  display_name   = excluded.display_name,
                  endpoint_type  = excluded.endpoint_type,
-                 is_active      = 1,
+                 -- A model proven uncallable stays retired however many times
+                 -- the provider keeps advertising it.
+                 is_active      = CASE WHEN provider_models.unservable=1 THEN 0 ELSE 1 END,
                  last_updated   = excluded.last_updated""",
             (provider, m["model_id"], m.get("display_name", m["model_id"]),
              m.get("endpoint_type", "default"), now),
@@ -311,6 +326,84 @@ def deactivate_provider_models(conn: sqlite3.Connection, provider: str) -> None:
     """Mark all models for a provider inactive (key failed validation)."""
     conn.execute("UPDATE provider_models SET is_active=0 WHERE provider=?", (provider,))
     conn.commit()
+
+
+def mark_model_unservable(conn: sqlite3.Connection, provider: str, model_id: str) -> None:
+    """Retire a model whose provider rejected it as unknown at inference time.
+
+    A provider's model listing is not always its inference catalogue: Perplexity
+    lists everything on its platform, but /chat/completions serves only some of
+    them. Rather than encode which those are — a hardcoded list would rot as the
+    vendor changes — the model is retired the first time the provider itself
+    says it does not exist.
+
+    The flag is separate from is_active so the next model sync, which reactivates
+    everything the listing still contains, cannot resurrect it.
+    """
+    conn.execute(
+        "UPDATE provider_models SET is_active=0, unservable=1 "
+        "WHERE provider=? AND model_id=?",
+        (provider, model_id),
+    )
+    conn.commit()
+
+
+class ModelNotRoutable(ValueError):
+    """A model selection could not be resolved to exactly one registry entry."""
+
+
+def resolve_model(conn: sqlite3.Connection, model_id: str,
+                  provider: str | None = None) -> dict:
+    """Resolve a selection to the one entry that says how to call it.
+
+    Returns {"provider", "model_id", "endpoint_type"}.
+
+    The registry is the only credible source, and it is not an inference: rows
+    are written by whichever adapter enumerated the model, using that provider's
+    own key, so the serving provider is recorded as fact. A model's *name* says
+    nothing — Perplexity resells kimi-* and glm-*, which look like nobody's
+    first-party models — and no listing field helps either: `owned_by` reports
+    who built the model, so Perplexity lists anthropic/claude-opus-5 as
+    owned_by=anthropic.
+
+    Pass `provider` to pin a specific vendor. It is required whenever more than
+    one serves the id, which is a real case worth supporting deliberately:
+    kimi-k3 direct from Moonshot and the same model resold by Perplexity are
+    different endpoints, keys, and prices, and a debate may legitimately want
+    one on each side.
+    """
+    if provider:
+        rows = conn.execute(
+            "SELECT provider, model_id, endpoint_type FROM provider_models "
+            "WHERE model_id=? AND provider=? AND is_active=1",
+            (model_id, provider),
+        ).fetchall()
+        if not rows:
+            raise ModelNotRoutable(
+                f"'{provider}' does not serve model '{model_id}'. Test that "
+                f"provider's API key in Settings to refresh its model list."
+            )
+        return dict(rows[0])
+
+    rows = conn.execute(
+        "SELECT provider, model_id, endpoint_type FROM provider_models "
+        "WHERE model_id=? AND is_active=1 ORDER BY provider",
+        (model_id,),
+    ).fetchall()
+    if not rows:
+        raise ModelNotRoutable(
+            f"No provider is registered for model '{model_id}'. Test the "
+            f"relevant API key in Settings to refresh the model list, or pick "
+            f"a different model."
+        )
+    if len(rows) > 1:
+        served_by = ", ".join(r["provider"] for r in rows)
+        raise ModelNotRoutable(
+            f"Model '{model_id}' is served by more than one provider "
+            f"({served_by}). Say which one to use — the same model from two "
+            f"vendors means different endpoints, keys, and prices."
+        )
+    return dict(rows[0])
 
 
 def list_available_models(

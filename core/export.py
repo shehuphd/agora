@@ -20,6 +20,100 @@ def _n(v) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Act content rendering
+#
+# Two act types carry JSON in `content` rather than prose: STATUS holds the
+# moderator's termination_checks, ARGUMENT_MAP holds the synthesiser's verdict.
+# The UI parses both (appendStatusBubble, renderArgumentMap); a Markdown export
+# that dumps the raw object makes the synthesis — the conclusion of the whole
+# debate — the least readable part of the document. These render the same
+# fields the UI shows, and fall back to the raw string whenever the content is
+# not the JSON we expect, so a malformed act still exports its bytes.
+# ---------------------------------------------------------------------------
+
+def format_status_content(content: str) -> str:
+    """Moderator STATUS termination_checks as an inline chip line."""
+    try:
+        c = json.loads(content)
+        if not isinstance(c, dict):
+            return str(content)
+    except Exception:
+        return str(content)
+
+    chips = []
+    if c.get("turns_used") is not None:
+        chips.append(f"`turn {c['turns_used']}/{c.get('max_turns', '?')}`")
+    if c.get("outstanding_challenge_count") is not None:
+        chips.append(f"`challenges open: {c['outstanding_challenge_count']}`")
+    if c.get("total_tokens") is not None:
+        chips.append(f"`tokens {_n(c['total_tokens'])}/{_n(c.get('token_budget'))}`")
+    if c.get("repetition_count"):
+        chips.append(f"`⚠ repetitions: {c['repetition_count']}"
+                     f"/{c.get('repetition_tolerance', '?')}`")
+    return " · ".join(chips) if chips else str(content)
+
+
+def _claim_bullets(claims: list, notes: list[tuple[str, str]]) -> list[str]:
+    """One bullet per claim, with `notes` as (json_field, label) sub-bullets."""
+    out = []
+    for c in claims:
+        if not isinstance(c, dict):
+            out.append(f"- {c}")
+            continue
+        out.append(f"- {c.get('final_text') or c.get('content') or ''}")
+        out += [f"  - *{label}: {c[field]}*" for field, label in notes if c.get(field)]
+    return out
+
+
+def format_argument_map_content(content: str) -> str:
+    """Synthesiser ARGUMENT_MAP as claim sections plus the arbiter summary."""
+    try:
+        c = json.loads(content)
+        if not isinstance(c, dict):
+            return str(content)
+    except Exception:
+        return str(content)
+
+    sections = [
+        ("surviving_claims", "Surviving claims", [("survived_because", "Survived because")]),
+        ("revised_claims", "Revised claims",
+         [("original_text", "Originally"), ("revised_because", "Revised because")]),
+        ("contested_claims", "Contested claims",
+         [("contested_because", "Contested because"), ("evidence_needed", "Evidence needed")]),
+    ]
+
+    lines: list[str] = []
+    for key, heading, notes in sections:
+        claims = c.get(key) or []
+        if not claims:
+            continue
+        lines += [f"**{heading}** ({len(claims)})", ""]
+        lines += _claim_bullets(claims, notes)
+        lines.append("")
+
+    if c.get("arbiter_summary"):
+        lines += ["**Arbiter summary**", "", str(c["arbiter_summary"]), ""]
+
+    if not lines:
+        # A map with no claims and no summary says something real: nothing survived.
+        return "*(empty argument map — no claims recorded)*"
+    return "\n".join(lines).rstrip()
+
+
+_CONTENT_FORMATTERS = {
+    "STATUS": format_status_content,
+    "ARGUMENT_MAP": format_argument_map_content,
+}
+
+
+def format_act_content(act_type: str, content: str) -> str:
+    """Render an act's content for Markdown, unpacking the JSON-bearing types."""
+    if not content:
+        return ""
+    return _CONTENT_FORMATTERS.get(act_type, str)(content)
+
+
+# ---------------------------------------------------------------------------
 # Build the API-response-style export dict from live state
 # ---------------------------------------------------------------------------
 
@@ -227,7 +321,7 @@ def build_markdown(data: dict) -> str:
             lines.append(f"*{' · '.join(meta_parts)}*")
             lines.append("")
         if content:
-            lines.append(content)
+            lines.append(format_act_content(act_type, content))
             lines.append("")
         if reason:
             lines.append(f"*{reason}*")
@@ -241,10 +335,15 @@ def build_markdown(data: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def write_debate_files(state: DialogueState, run_dir: Path) -> None:
-    """Rewrite debate.json and debate.md in run_dir from current state.
+    """Rewrite debate.json in run_dir from current state.
 
-    Called after every checkpoint so the files are always current.
-    Reads config.json and overrides.json from the run dir if they exist.
+    Called after every checkpoint so the file is always current. Reads
+    config.json and overrides.json from the run dir if they exist.
+
+    Only data is persisted. Markdown is a *rendering* of this file and is
+    produced on demand at export time — writing it here would freeze every run
+    at whichever renderer existed when it closed, so a later fix to
+    build_markdown would never reach it.
     """
     config_path   = run_dir / "config.json"
     overrides_path = run_dir / "overrides.json"
@@ -266,4 +365,3 @@ def write_debate_files(state: DialogueState, run_dir: Path) -> None:
     data = build_export_dict(state, config_dict, override_log)
 
     (run_dir / "debate.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
-    (run_dir / "debate.md").write_text(build_markdown(data), encoding="utf-8")

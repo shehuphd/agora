@@ -51,12 +51,15 @@ _CITATION_CONTRACT = (
     "acceptable; an invented citation is not."
 )
 
-_KEY_ENV_MAP = {
-    "anthropic":  "ANTHROPIC_API_KEY",
-    "openai":     "OPENAI_API_KEY",
-    "google":     "GOOGLE_API_KEY",
-    "perplexity": "PERPLEXITY_API_KEY",
-}
+def _key_env(provider: str) -> str:
+    """Env var holding this provider's key, per the adapter that defines it.
+
+    Asked of the provider registry rather than kept as a second list here —
+    a parallel copy silently omits any newly registered provider, and the
+    failure looks like a missing key rather than a missing entry.
+    """
+    from providers import get_key_env
+    return get_key_env(provider)
 
 
 class BaseAgent:
@@ -66,23 +69,24 @@ class BaseAgent:
     # the pool the debaters filled — they never need their own retrieval.
     RETRIEVES = False
 
-    def __init__(self, role: str, nickname: str, model: str, temperature: float, config: dict):
+    def __init__(self, role: str, nickname: str, model: str, temperature: float,
+                 config: dict, provider: str, endpoint_type: str = "default"):
         self.role = role
         self.nickname = nickname
         self.model = model
         self.temperature = temperature
         self.config = config
-        if model.startswith("claude"):
-            self._provider = "anthropic"
-        elif model.startswith("gemini"):
-            self._provider = "google"
-        elif model.startswith("sonar") or model == "r1-1776":
-            self._provider = "perplexity"
-        else:
-            self._provider = "openai"
-        # Look up endpoint_type from the provider_models DB; adapters use this to
-        # pick Chat Completions vs Responses API vs generate_content, etc.
-        self._endpoint_type = self._resolve_endpoint_type()
+        # Told, not derived. Routing is resolved once against the registry when
+        # the debate is created and carried in the run config, so an agent has
+        # no lookup to do and a mid-run registry change cannot silently
+        # redirect a call to a different vendor than the run recorded.
+        if not provider:
+            raise ValueError(
+                f"{role} agent needs a provider for model '{model}'. Routing is "
+                f"resolved at debate creation via runs_db.resolve_model."
+            )
+        self._provider = provider
+        self._endpoint_type = endpoint_type or "default"
 
     # ------------------------------------------------------------------
     # Public interface
@@ -152,14 +156,13 @@ class BaseAgent:
 
         tier, sources = _search.search(query, max_results=8, run_dir=run_dir)
         if tier != "none":
-            _search.enrich_sources(sources, top_k=2)
             provider_label = tier
         else:
             # Token-billed vendor search — the expensive path. active_tier()
             # already reports 'provider' so the UI can warn before this happens.
             from providers import research as _research
             try:
-                key = os.environ[_KEY_ENV_MAP[self._provider]]
+                key = os.environ[_key_env(self._provider)]
                 _findings, sources, r_in, r_out = _research(
                     self._provider, key, self.model, query,
                 )
@@ -170,6 +173,8 @@ class BaseAgent:
             except Exception as exc:
                 print(f"[sources] retrieval failed ({self.role}): {exc}", flush=True)
                 return in_tok, out_tok
+
+        _search.enrich_sources(sources, sample_k=3)
 
         pool.add_many([
             Source(
@@ -459,31 +464,10 @@ class BaseAgent:
     # Provider dispatch — all LLM calls go through here
     # ------------------------------------------------------------------
 
-    def _resolve_endpoint_type(self) -> str:
-        """Look up endpoint_type for this model from the provider_models DB.
-
-        Falls back to 'default' if the DB is empty or the model isn't listed yet
-        (e.g. first run before any key has been tested).
-        """
-        try:
-            from core.runs_db import connect as _db_connect
-            conn = _db_connect()
-            row = conn.execute(
-                "SELECT endpoint_type FROM provider_models WHERE provider=? AND model_id=?",
-                (self._provider, self.model),
-            ).fetchone()
-            conn.close()
-            return (row["endpoint_type"] or "default") if row else "default"
-        except Exception:
-            return "default"
-
     def _call_provider(self, system: str, user: str, max_tokens: int = 2048) -> tuple[str, int, int]:
         """Route inference to the correct provider adapter via the central router."""
         from providers import generate as _router_generate
-        key_env = _KEY_ENV_MAP.get(self._provider)
-        if not key_env:
-            raise ValueError(f"No key env mapping for provider '{self._provider}'")
-        key = os.environ[key_env]
+        key = os.environ[_key_env(self._provider)]
         return _router_generate(
             self._provider, key, self.model, self._endpoint_type,
             system, user, self.temperature, max_tokens,

@@ -66,8 +66,11 @@ async def _validate_all_keys(keys: dict) -> dict:
     if to_validate:
         async def _run(provider: str, value: str):
             if provider == "serper":
-                # Search key, not an LLM key — no model list to refresh.
                 r = await asyncio.to_thread(_test_serper_key, value)
+                _key_cache[provider] = {"key": value, "result": r, "ts": time.time()}
+                return provider, r
+            if provider == "brave":
+                r = await asyncio.to_thread(_test_brave_key, value)
                 _key_cache[provider] = {"key": value, "result": r, "ts": time.time()}
                 return provider, r
             r = await test_key_async(provider, value)
@@ -173,11 +176,16 @@ _FACTORY_DEFAULTS = {
 RUNS_DIR       = Path(__file__).parent.parent.parent / "runs"
 _WARNINGS_PATH = Path(__file__).parent.parent.parent / "config" / "key_warnings.json"
 
+_SEARCH_KEY_ENVS = {
+    "serper": "SERPER_API_KEY",
+    "brave":  "BRAVE_API_KEY",
+}
+
+
 def _key_env_name(provider: str) -> str:
     """Return the env var name for a provider's API key. Raises 400 for unknown providers."""
-    if provider == "serper":
-        # Search service, not an LLM provider — key managed here, used by core/search.
-        return "SERPER_API_KEY"
+    if provider in _SEARCH_KEY_ENVS:
+        return _SEARCH_KEY_ENVS[provider]
     try:
         return get_key_env(provider)
     except ValueError:
@@ -192,6 +200,25 @@ def _test_serper_key(key: str) -> dict:
             "https://google.serper.dev/search",
             headers={"X-API-KEY": key, "Content-Type": "application/json"},
             json={"q": "ping", "num": 1},
+            timeout=10.0,
+        )
+        if r.status_code == 200:
+            return {"present": True, "valid": True, "error": None}
+        if r.status_code in (401, 403):
+            return {"present": True, "valid": False, "error": "Invalid API key"}
+        return {"present": True, "valid": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"present": True, "valid": False, "error": str(e)[:60]}
+
+
+def _test_brave_key(key: str) -> dict:
+    """Validate a Brave Search key with a minimal search."""
+    import httpx
+    try:
+        r = httpx.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers={"X-Subscription-Token": key, "Accept": "application/json"},
+            params={"q": "ping", "count": 1},
             timeout=10.0,
         )
         if r.status_code == 200:
@@ -268,7 +295,8 @@ async def get_settings():
         p: (os.environ.get(get_key_env(p)) or "").strip()
         for p in list_provider_names()
     }
-    raw_keys["serper"] = (os.environ.get("SERPER_API_KEY") or "").strip()
+    for name, env in _SEARCH_KEY_ENVS.items():
+        raw_keys[name] = (os.environ.get(env) or "").strip()
     key_info   = await _validate_all_keys(raw_keys)
     # key_status stays True only for valid keys — gates model dropdowns everywhere.
     key_status = {p: info["valid"] for p, info in key_info.items()}
@@ -276,6 +304,12 @@ async def get_settings():
     return {
         "key_info":   key_info,
         "key_status": key_status,
+        # Env var per key, so the settings screen renders whatever providers are
+        # registered instead of keeping its own list that a new adapter misses.
+        "key_envs": {
+            **{p: get_key_env(p) for p in list_provider_names()},
+            **_SEARCH_KEY_ENVS,
+        },
         # legacy fields
         "anthropic_key_present": key_status.get("anthropic", False),
         "openai_key_present":    key_status.get("openai", False),
@@ -354,9 +388,15 @@ async def reset_tokens():
 
 @router.post("/settings/keys")
 async def update_key(payload: dict):
-    """Write a single API key to .env. Payload: {provider: str, value: str}."""
+    """Write a single API key to .env. Payload: {provider: str, value: str}.
+
+    Requires an explicit non-empty ``value``; omitting it is a 400, not a
+    silent wipe of the existing key.
+    """
     provider = payload.get("provider", "").lower()
     value    = (payload.get("value") or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="Missing or empty 'value' field")
     env_name = _key_env_name(provider)  # raises 400 for unknown providers
     with ActionTrace.start(action="settings.key_save", kind="app", actor="user",
                            project="agora", meta={"provider": provider}) as t:
