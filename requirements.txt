@@ -10,4 +10,4 @@ pytest
 httpx
 python-multipart
 trafilatura
-traceact>=0.10.0
+traceact>=0.12.0
