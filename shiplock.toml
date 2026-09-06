@@ -1,4 +1,5 @@
-# Shiplock release gate. Runs locally (shiplock check), in the suite
+# Shiplock release gate: pypi.org/project/shiplock
+# Runs locally (shiplock check), in the suite
 # (tests/test_docs.py), and in CI once a workflow exists.
 # Agora ships no PyPI package: no [version] (no __version__ anywhere) and no
 # readme key (relative doc links are fine on GitHub, and readme-links exists
