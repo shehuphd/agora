@@ -1,3 +1,16 @@
+batch:
+  # Debates run at once per batch job. Clamped to 1-3: higher hits provider
+  # rate limits, and 1 makes big batches slow.
+  concurrency: 2
+judge:
+  # Judge scoring defaults (explicit invocation only — judging bills per run).
+  # Picked from the 2026-09-05 A/B on a 100-turn run: the small model's
+  # fidelity verdicts were 87% unanimous across 3 votes (1 vote costs a third
+  # and moves the score 1.7 points), and gpt-4.1's map votes were identical
+  # across all three while sonar-pro's spread 0.62-0.95 at ~3.5x the price.
+  fidelity_model: gemini-flash-lite-latest
+  map_model: gpt-4.1
+  votes: 1
 agent_settings:
   chapter_every: 10
   history_window: 6
@@ -17,8 +30,6 @@ agents:
   synthesiser:
     model: sonar
     temperature: 0.3
-openai:
-  responses_mode: auto
 output:
   generate_markdown: true
   score_final_output: true
@@ -26,7 +37,7 @@ output:
 protocol:
   max_steelman_attempts: 2
   max_time_minutes: 15
-  max_turns: 60
+  max_turns: 100
   min_challenges: 5
   min_concessions: 2
   repetition_tolerance: 2
@@ -40,5 +51,6 @@ providers:
   - google
   - perplexity
   - moonshot
+  - xai
 ui:
   history_page_size: 50

@@ -91,6 +91,30 @@ class Act:
     output_tokens: int
     model_used: str
     timestamp: str        # ISO timestamp
+    # Dollar cost of this act's tokens, priced by core/cost.py at the moment
+    # the act was generated (recorded, never recomputed later against
+    # whatever rates happen to say at read time). None when the model
+    # couldn't be priced.
+    cost_usd: Optional[float] = None
+    # Challenge taxonomy label from the opposition's JSON ("sourcing",
+    # "premise", ..., or "multi"). None for every other act type, and for
+    # opposition acts recorded before this field existed.
+    challenge_type: Optional[str] = None
+    # Correction re-prompts this act needed before parsing and validating
+    # (0 = clean first parse). None for acts recorded before this field
+    # existed — unknown, not zero.
+    retries: Optional[int] = None
+    # Corrective re-prompts triggered by a mismatched quote (a quote the
+    # cited source's stored text doesn't contain), bounded to one per act.
+    # Kept separate from retries so quote drift stays measurable even when
+    # the repair succeeds. None for acts recorded before this field existed.
+    citation_repairs: Optional[int] = None
+    # Structured citations from the agent's JSON: a list of
+    # {"url", "quote", "status", "ungrounded_numbers"} dicts, with status and
+    # grounding filled in by the mechanical check (core/citations.py) after
+    # generation. None for acts recorded before this field existed, and for
+    # act types that never cite.
+    citations: Optional[list] = None
 
 
 @dataclass
@@ -113,6 +137,69 @@ class DialogueState:
     closure_reason: Optional[str]
     steelman_mode: bool = False          # True = Rapoport mode (require steelman)
     chapters: list = field(default_factory=list)  # LLM chapter summaries, every K turns (see agent_settings.chapter_every)
+    lapsed_challenges: list = field(default_factory=list)  # act_ids retired by lapse_stale_challenges
+    # Spend on auxiliary model calls that produce no act (chapter and epoch
+    # summaries), priced at call time. Kept separate so per-act costs still
+    # sum to the acts' own figures; the run total adds this on top.
+    aux_cost_usd: float = 0.0
+
+
+# A defended challenge with no opposition follow-up for this many debater
+# turns lapses: it leaves outstanding_challenges (and every prompt built from
+# it) and is recorded in lapsed_challenges. Without this, challenges the
+# opposition has moved on from accumulate forever and every seat's prompt
+# grows linearly with them.
+LAPSE_AFTER_TURNS = 10
+
+
+def lapse_stale_challenges(state: "DialogueState", n: int = LAPSE_AFTER_TURNS) -> list:
+    """Retire outstanding challenges the debate has moved past.
+
+    A challenge lapses when all three hold: it has at least one DEFEND or
+    REVISE responding to it, the opposition has not followed up on that
+    thread since the last such defence, and at least `n` debater turns have
+    passed since that defence. Undefended challenges never lapse — silence
+    from the proposition keeps a challenge alive indefinitely.
+
+    A follow-up must target the thread itself: the challenge's own act, or
+    one of its defences. Merely sharing the claim does not count — in a
+    single-claim debate every opposition act shares the claim, which made the
+    original claim-wide test keep all 50 challenges alive across 100 turns
+    (measured 2026-09-05, zero lapses). Defences still match by claim as a
+    fallback because the proposition sometimes omits target_act_id.
+
+    Deterministic on purpose: the condition is objective, so it runs as
+    protocol rather than as a moderator judgement call. Returns the act_ids
+    that lapsed this call.
+    """
+    lapsed: list = []
+    for ch_id in list(state.outstanding_challenges):
+        ch = next((a for a in state.acts if a.act_id == ch_id), None)
+        if ch is None:
+            continue
+        defences = [
+            a for a in state.acts
+            if a.act_type in ("DEFEND", "REVISE")
+            and a.turn > ch.turn
+            and (a.target_act_id == ch_id or (ch.claim_id and a.claim_id == ch.claim_id))
+        ]
+        if not defences:
+            continue
+        last_defence_turn = max(a.turn for a in defences)
+        thread_ids = {ch_id} | {a.act_id for a in defences}
+        followed_up = any(
+            a.agent_role == "opposition"
+            and a.turn > last_defence_turn
+            and a.target_act_id in thread_ids
+            for a in state.acts
+        )
+        if followed_up:
+            continue
+        if state.turn - last_defence_turn >= n:
+            state.outstanding_challenges.remove(ch_id)
+            state.lapsed_challenges.append(ch_id)
+            lapsed.append(ch_id)
+    return lapsed
 
 
 def legal_acts_for(state: DialogueState) -> list:

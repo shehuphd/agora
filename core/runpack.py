@@ -33,7 +33,7 @@ _RETRIEVE_RE = re.compile(r"retrieve:\s*(\d+)\+(\d+)\s*tokens,\s*pool=(\d+)")
 
 # ---------------------------------------------------------------------------
 # Loaders — every one is best-effort; a missing file degrades the pack, never
-# fails it. A pack for a run whose search log was deleted is still worth having.
+# fails it. A pack for a run whose search log was deleted still has value.
 # ---------------------------------------------------------------------------
 
 def _load_json(path: Path, default):
@@ -100,7 +100,7 @@ def _trace_tokens(trace: dict) -> tuple[int, int]:
 
 
 def _summarise_trace(trace: dict) -> dict:
-    """The parts of a span worth keeping in a turn record."""
+    """The parts of a span kept in a turn record."""
     tin, tout = _trace_tokens(trace)
     outputs = trace.get("outputs") or {}
     steps = _step_labels(trace)
@@ -162,7 +162,7 @@ def _generate_traces_by_turn(traces: list[dict]) -> dict[tuple[int, str], dict]:
     """agent.generate spans keyed by (turn, actor).
 
     A turn can hold two spans for one actor when the JSON-repair path fires;
-    the first is kept, since that is the call the act actually came from.
+    the first is kept, since that is the call the act came from.
     """
     idx: dict[tuple[int, str], dict] = {}
     for t in traces:
@@ -180,7 +180,7 @@ def _source_digest(s: dict, include_excerpt: bool = True) -> dict:
     """One pool entry. `excerpt_chars` is always reported; the body is optional.
 
     Truncation belongs to the renderer, not here — the JSON pack carries the
-    excerpt whole so a reader can reproduce what the agent actually saw.
+    excerpt whole so a reader can reproduce what the agent saw.
     """
     excerpt = s.get("excerpt") or ""
     out = {
@@ -276,6 +276,10 @@ def build_run_pack(
                 "input": act.get("input_tokens") or 0,
                 "output": act.get("output_tokens") or 0,
             },
+            # Recorded at generation time (agents/base.py), not recomputed
+            # here — see the module docstring's "nothing here is recomputed".
+            # None means this act's model couldn't be priced, not that it was free.
+            "cost_usd": act.get("cost_usd"),
             "content": act.get("content"),
             "reason": act.get("reason"),
             "retrieval": retrieval,
@@ -302,19 +306,36 @@ def build_run_pack(
         "trace_errors": sum(1 for t in traces if t.get("errors")),
     }
 
-    # ---- token usage by role, from the acts themselves
-    usage: dict[str, dict[str, int]] = {}
+    # ---- token usage and dollar cost by role, from the acts themselves.
+    # cost_usd is read back from each act (recorded at generation time),
+    # never recomputed — see the "cost_usd" comment on turns_out above.
+    usage: dict[str, dict[str, Any]] = {}
     for act in acts:
         role = act.get("agent_role") or "unknown"
-        u = usage.setdefault(role, {"input": 0, "output": 0, "calls": 0})
+        u = usage.setdefault(role, {
+            "input": 0, "output": 0, "calls": 0,
+            "cost_usd": 0.0, "cost_partial": False,
+        })
         u["input"] += act.get("input_tokens") or 0
         u["output"] += act.get("output_tokens") or 0
         u["calls"] += 1
+        act_cost = act.get("cost_usd")
+        if act_cost is None:
+            u["cost_partial"] = True
+        else:
+            u["cost_usd"] += act_cost
     for u in usage.values():
         u["total"] = u["input"] + u["output"]
+        # A role with no priced act at all reports cost as unknown (None),
+        # not $0 — those aren't the same claim.
+        if u["cost_usd"] == 0.0 and u["cost_partial"]:
+            u["cost_usd"] = None
     grand_total = sum(u["total"] for u in usage.values())
     for role, u in usage.items():
         u["share"] = round(u["total"] / grand_total, 3) if grand_total else 0.0
+    total_cost_usd = sum(u["cost_usd"] for u in usage.values() if u["cost_usd"] is not None)
+    cost_priced_any = any(u["cost_usd"] is not None for u in usage.values())
+    cost_partial = any(u["cost_partial"] for u in usage.values())
 
     searches_out = []
     for e in searches:
@@ -343,7 +364,12 @@ def build_run_pack(
             "experiment_name": data.get("experiment_name"),
         },
         "config": data.get("config") or {},
-        "token_usage": {"by_role": usage, "total": grand_total},
+        "token_usage": {
+            "by_role": usage,
+            "total": grand_total,
+            "cost_usd": total_cost_usd if cost_priced_any else None,
+            "cost_partial": cost_partial,
+        },
         "integrity": integrity,
         "turns": turns_out,
         "claims": data.get("claims") or [],
@@ -370,6 +396,14 @@ def _trunc(s, n: int) -> str:
     s = str(s or "")
     s = s.replace("|", "\\|").replace("\n", " ")
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _fmt_cost(usd, partial: bool = False) -> str:
+    """Mirrors static/render.js's formatCost — same rules, same reader."""
+    if usd is None:
+        return "—"
+    text = f"${usd:.4f}" if 0 < abs(usd) < 0.01 else f"${usd:.2f}"
+    return f"{text}+" if partial else text
 
 
 def build_pack_markdown(pack: dict, excerpt_chars: int = 800) -> str:
@@ -436,6 +470,7 @@ def build_pack_markdown(pack: dict, excerpt_chars: int = 800) -> str:
     L += _md_table(["Setting", "Value"], cfg_rows)
 
     # ---- token usage
+    tok = pack.get("token_usage") or {}
     L += ["", "## Token usage", ""]
     rows = []
     for role in ("proposition", "opposition", "moderator", "synthesiser"):
@@ -444,12 +479,17 @@ def build_pack_markdown(pack: dict, excerpt_chars: int = 800) -> str:
             continue
         rows.append([
             role, _n(u["calls"]), _n(u["input"]), _n(u["output"]),
-            _n(u["total"]), f"{u['share']:.0%}",
+            _n(u["total"]), f"{u['share']:.0%}", _fmt_cost(u["cost_usd"], u["cost_partial"]),
         ])
-    total = (pack.get("token_usage") or {}).get("total", 0)
-    rows.append(["**total**", "", "", "", f"**{_n(total)}**", "100%"])
-    L += _md_table(["Role", "Calls", "In", "Out", "Total", "Share"], rows,
-                   align_right={1, 2, 3, 4, 5})
+    total = tok.get("total", 0)
+    rows.append([
+        "**total**", "", "", "", f"**{_n(total)}**", "100%",
+        f"**{_fmt_cost(tok.get('cost_usd'), tok.get('cost_partial', False))}**",
+    ])
+    L += _md_table(["Role", "Calls", "In", "Out", "Total", "Share", "Cost"], rows,
+                   align_right={1, 2, 3, 4, 5, 6})
+    if tok.get("cost_partial"):
+        L += ["", "*Cost is a minimum — one or more calls used a model `rates` couldn't price.*"]
 
     # ---- retrieval ledger: one row per search
     searches = pack.get("searches") or []

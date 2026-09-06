@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from agents.base import BaseAgent
 from core.state import Act, DialogueState
+from core import cost as _cost
 
 
 _SYSTEM = """\
@@ -13,7 +14,7 @@ You never participated in the debate. You read it in full and produce an argumen
 
 IDENTITY
   Role: synthesiser
-  You emit exactly one output per debate session, after CLOSE.
+  You emit a single output per debate session, after CLOSE.
   Legal act: ARGUMENT_MAP
   Forbidden acts (never emit): ASSERT, CHALLENGE, REVISE, DEFEND, CONCEDE, PROPOSE, STATUS, CLOSE
 
@@ -24,7 +25,7 @@ OBJECTIVE
 Produce a structured argument map showing:
 - Which claims survived all challenges unchanged
 - Which claims were revised under pressure and accepted after revision
-- Which claims remained genuinely contested at closure (neither conceded nor resolved)
+- Which claims remained truly contested at closure (neither conceded nor resolved)
 - A prose summary explaining the key argumentative moves that shaped the outcome
 
 OUTPUT FORMAT — return ONLY this JSON object, no preamble, no markdown fences:
@@ -75,8 +76,7 @@ class SynthesiserAgent(BaseAgent):
     """Activated after CLOSE. Reads full act log and produces structured argument map."""
 
     def __init__(self, nickname: str = "Synthesis", model: str = "claude-sonnet-4-6",
-                 temperature: float = 0.3, config: dict = None, provider: str = "",
-                 endpoint_type: str = "default"):
+                 temperature: float = 0.3, config: dict = None, provider: str = ""):
         super().__init__(
             role="synthesiser",
             nickname=nickname,
@@ -84,7 +84,6 @@ class SynthesiserAgent(BaseAgent):
             temperature=temperature,
             config=config or {},
             provider=provider,
-            endpoint_type=endpoint_type,
         )
 
     def _parse_result(self, raw, state, input_tok, output_tok):
@@ -131,7 +130,7 @@ class SynthesiserAgent(BaseAgent):
 </turn_cards>
 {chapters_block}</debate_data>
 
-Your role is synthesiser. The debate has closed. Produce exactly one ARGUMENT_MAP JSON object. No other text.\
+Your role is synthesiser. The debate has closed. Produce a single ARGUMENT_MAP JSON object. No other text.\
 """
         return _SYSTEM, user
 
@@ -140,7 +139,10 @@ Your role is synthesiser. The debate has closed. Produce exactly one ARGUMENT_MA
 
         Called by the runner every K turns (agent_settings.chapter_every).
         Plain-text call, no pool, no JSON contract. Raises nothing upward —
-        a failed chapter costs detail, never the debate.
+        a failed chapter costs detail, never the debate. The call is traced
+        with its full prompt, and its tokens and cost are recorded on state
+        (token_usage for the synthesiser role, aux_cost_usd), so a chapter
+        is never an off-the-books provider call.
         """
         acts = [a for a in state.acts if start_turn <= a.turn <= end_turn]
         if not acts:
@@ -148,18 +150,78 @@ Your role is synthesiser. The debate has closed. Produce exactly one ARGUMENT_MA
         lines = []
         for a in acts:
             lines.append(f"T{a.turn} {a.agent_role} {a.act_type}: {self._sanitize(a.content)[:400]}")
-        try:
-            text, _i, _o = self._call_provider(
-                "You summarise debate chapters. Write 3-5 plain sentences covering the "
-                "argumentative moves in these turns: what was claimed, challenged, "
-                "conceded, and how positions shifted. No preamble, no JSON.",
-                "\n".join(lines),
-                max_tokens=300,
-            )
-            return f"[Turns {start_turn}-{end_turn}] {text.strip()}"
-        except Exception as exc:
-            print(f"[synthesiser] chapter summary failed: {exc}", flush=True)
+        system = (
+            "You summarise debate chapters. Write 3-5 plain sentences covering the "
+            "argumentative moves in these turns: what was claimed, challenged, "
+            "conceded, and how positions changed. No preamble, no JSON."
+        )
+        text = self._aux_call(
+            state, "synthesiser.chapter", system, "\n".join(lines),
+            max_tokens=300, meta={"start_turn": start_turn, "end_turn": end_turn},
+        )
+        return f"[Turns {start_turn}-{end_turn}] {text.strip()}" if text else ""
+
+    def summarise_epoch(self, state: DialogueState, chapters: list[str]) -> str:
+        """Collapse several chapter summaries into one epoch summary.
+
+        Called by the runner when the chapter list outgrows its cap, so the
+        summaries themselves stay bounded on long runs. Same contract as
+        summarise_chapter: traced, billed to state, never raises upward.
+        """
+        if not chapters:
             return ""
+        import re as _re
+        turns = _re.findall(r"\[Turns (\d+)-(\d+)\]", "\n".join(chapters))
+        start = turns[0][0] if turns else "?"
+        end = turns[-1][1] if turns else "?"
+        system = (
+            "You compress debate chapter summaries. Combine the chapters below "
+            "into one summary of at most 6 plain sentences: the main claims, the "
+            "strongest challenges, what was conceded, and where positions ended "
+            "up. No preamble, no JSON."
+        )
+        text = self._aux_call(
+            state, "synthesiser.epoch", system, "\n\n".join(chapters),
+            max_tokens=400, meta={"chapters": len(chapters)},
+        )
+        return f"[Turns {start}-{end}] {text.strip()}" if text else ""
+
+    def _aux_call(self, state: DialogueState, action: str, system: str, user: str,
+                  max_tokens: int, meta: dict) -> str:
+        """One traced, billed auxiliary provider call that produces no act.
+
+        Tokens go to the synthesiser's token_usage (they count against the
+        run budget); cost goes to state.aux_cost_usd. Failures are traced and
+        logged, then swallowed — auxiliary detail must never kill a debate.
+        """
+        from traceact import ActionTrace
+        with ActionTrace.start(
+            action=action,
+            kind="model",
+            actor=self.role,
+            project="agora",
+            correlation_id=state.run_id,
+            meta={"model": self.model, **meta},
+        ) as trace:
+            trace.input({"system": system, "user": user})
+            try:
+                text, in_tok, out_tok = self._call_provider(system, user, max_tokens=max_tokens)
+            except Exception as exc:
+                trace.step(f"{action} failed: {type(exc).__name__}")
+                trace.output({"error": str(exc)})
+                print(f"[synthesiser] {action} failed: {exc}", flush=True)
+                return ""
+            trace.model(operation="completion", target=self.model,
+                        provider=self._provider, tokens_in=in_tok, tokens_out=out_tok)
+            usage = state.token_usage.get(self.role)
+            if usage:
+                usage.input_tokens += in_tok
+                usage.output_tokens += out_tok
+            call_cost = _cost.cost_usd(self._provider, self.model, in_tok, out_tok)
+            if call_cost is not None:
+                state.aux_cost_usd = getattr(state, "aux_cost_usd", 0.0) + call_cost
+            trace.output({"summary": text})
+            return text or ""
 
     def _parse_synthesiser_response(self, raw: str, state: DialogueState, input_tokens: int, output_tokens: int) -> Act:
         """Parse ARGUMENT_MAP JSON into an Act. Full JSON stored as content for frontend rendering."""
@@ -182,4 +244,5 @@ Your role is synthesiser. The debate has closed. Produce exactly one ARGUMENT_MA
             output_tokens=output_tokens,
             model_used=self.model,
             timestamp=datetime.utcnow().isoformat(),
+            cost_usd=_cost.cost_usd(self._provider, self.model, input_tokens, output_tokens),
         )

@@ -71,7 +71,7 @@ function _showContinueButton(runId) {
 }
 
 export async function loadDebate(runId) {
-  debateTok = { total: 0, proposition: 0, opposition: 0, moderator: 0 };
+  debateTok = { total: 0, proposition: 0, opposition: 0, moderator: 0, cost: null, unpriced: false };
   let _tokOffset = { total: 0, proposition: 0, opposition: 0, moderator: 0 };
   debateCfg = {};
   _runId     = runId;
@@ -120,7 +120,9 @@ export async function loadDebate(runId) {
       _effectiveBudget = debateCfg.token_budget || 100_000;
       if (data.token_offset) {
         _tokOffset = { ...data.token_offset };
-        debateTok  = { ...data.token_offset };
+        // A continued run's offset predates cost tracking of this segment;
+        // the display counters restart alongside the token counters.
+        debateTok  = { ...data.token_offset, cost: null, unpriced: false };
       }
       _renderDebateChips(debateCfg, data.experiment_name);
       resetTerminationTracker(debateCfg.max_turns);
@@ -157,6 +159,7 @@ export async function loadDebate(runId) {
       if (data.status === 'closed' || data.status === 'error') {
         markDebateClosed();
         _offerContinue();
+        _renderJudgePanel(runId);
         return;
       }
       if (data.status === 'running') {
@@ -166,6 +169,78 @@ export async function loadDebate(runId) {
       _openSSE(runId);
     }
   } catch (e) { console.warn('debate state load failed', e); }
+}
+
+// Judge panel on a closed run: shows the latest stored scores, or a
+// judge button carrying the rates-priced estimate so nothing bills without
+// the price on the label. Polls while a judgement is in flight.
+async function _renderJudgePanel(runId) {
+  const feed = document.getElementById('act-feed');
+  if (!feed) return;
+  const div = document.createElement('div');
+  div.className = 'act-bubble act-system';
+  feed.appendChild(div);
+  const fmt = (v) => (v == null ? '—' : Number(v).toFixed(2));
+
+  const wireBtn = (id) => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await fetch(`/debates/${runId}/judge`, { method: 'POST' });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          div.innerHTML = `<div class="act-text">Judging couldn't start: `
+            + `${d.detail || 'check that the judge models have tested keys in Settings'}</div>`;
+          return;
+        }
+      } catch (_) {
+        div.innerHTML = `<div class="act-text">Judging couldn't start — is the server running?</div>`;
+        return;
+      }
+      render();
+    };
+  };
+
+  const render = async () => {
+    let data;
+    try {
+      const r = await fetch(`/debates/${runId}/judgements`);
+      if (!r.ok) { div.remove(); return; }
+      data = await r.json();
+    } catch (_) { div.remove(); return; }
+
+    if (data.in_progress) {
+      div.innerHTML = `<div class="act-text">Judging in progress… scores appear here when it finishes.</div>`;
+      setTimeout(render, 4000);
+      return;
+    }
+    const latest = (data.judgements || []).slice(-1)[0];
+    if (latest) {
+      const s = latest.scores || {};
+      const cost = latest.cost_usd != null ? `$${latest.cost_usd.toFixed(3)}` : 'cost unknown';
+      div.innerHTML = `<div class="act-text"><strong>Judge scores</strong> — `
+        + `citation fidelity ${fmt(s.citation_fidelity && s.citation_fidelity.score)}, `
+        + `argument map ${fmt(s.map_quality && s.map_quality.score)}, `
+        + `concession chains ${fmt(s.challenge_resolution && s.challenge_resolution.score)} `
+        + `(spent ${cost}) `
+        + `<button id="btn-judge-again" class="btn-ghost">judge again</button></div>`;
+      wireBtn('btn-judge-again');
+    } else {
+      let est = null;
+      try {
+        const r = await fetch(`/debates/${runId}/judge/estimate`);
+        if (r.ok) est = await r.json();
+      } catch (_) {}
+      const price = est && est.estimate_usd != null
+        ? `~$${est.estimate_usd.toFixed(2)}` : 'cost unknown';
+      div.innerHTML = `<div class="act-text"><strong>Judge scores</strong> — not judged yet. `
+        + `<button id="btn-judge-run" class="btn-ghost">Judge this run (${price})</button></div>`;
+      wireBtn('btn-judge-run');
+    }
+  };
+  render();
 }
 
 function _wireRerunButton(cfg) {
@@ -206,7 +281,7 @@ function _wireRerunButton(cfg) {
       prop_temperature:        cfg.temperature_proposition ?? 0.7,
       opp_temperature:         cfg.temperature_opposition  ?? 0.4,
       opp_aggression:          cfg.aggression              ?? 0.8,
-      max_turns:               cfg.max_turns               ?? 15,
+      max_turns:               cfg.max_turns               ?? 100,
       max_time_minutes:        cfg.max_time_minutes        ?? 30,
       token_budget:            cfg.token_budget            ?? 100_000,
       min_challenges:          cfg.min_challenges          ?? 2,
@@ -277,7 +352,7 @@ function _openSSE(runId) {
       return;
     }
 
-    // Real act
+    // An ordinary act
     const act = msg;
     removeThinkingBubble();
     appendActBubble(act);
@@ -326,7 +401,7 @@ function _openSSE(runId) {
           return;
         }
       }
-      // Runner still alive — check if it closed cleanly while we were disconnected.
+      // Runner still alive — check if it closed normally while we were disconnected.
       const check = await fetch(`/debates/${runId}`);
       if (check.ok) {
         const d = await check.json();
@@ -355,6 +430,10 @@ function _accumulateTokens(act) {
   if (act.agent_role === 'proposition') debateTok.proposition += delta;
   if (act.agent_role === 'opposition')  debateTok.opposition  += delta;
   if (act.agent_role === 'moderator')   debateTok.moderator   += delta;
+  // Recorded per-act cost. null cost with nonzero tokens = unpriced model, so
+  // the running figure is a minimum ("+" suffix), not exact.
+  if (act.cost_usd != null) debateTok.cost = (debateTok.cost ?? null) === null ? act.cost_usd : debateTok.cost + act.cost_usd;
+  else if (delta > 0) debateTok.unpriced = true;
 }
 
 function _setPauseButtonState(paused) {

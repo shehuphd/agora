@@ -1,6 +1,6 @@
 // history.js — history screen: table rendering, selection, export, pagination.
 
-import { esc, formatTokens, triggerDownload } from './render.js';
+import { esc, formatTokens, formatCost, triggerDownload } from './render.js';
 
 let _pageSize = 50;
 
@@ -108,6 +108,8 @@ export async function loadHistory(offset = 0) {
       title:  d => (d.debate_title || d.topic || '').toLowerCase(),
       turns:  d => d.turn || 0,
       tokens: d => d.total_tokens || 0,
+      // Unknown cost sorts lowest rather than as $0 — it isn't free, it's unpriced.
+      cost:   d => d.total_cost_usd ?? -1,
       status: d => d.status || '',
     };
 
@@ -137,6 +139,7 @@ export async function loadHistory(offset = 0) {
 
     function renderRows() {
       tbody.innerHTML = '';
+      _renderSpendLine(debates);
       sortedDebates().forEach(d => {
         const statusCls = d.status === 'running' ? 'pill-live' : d.status === 'paused' ? 'pill-paused' : 'pill-done';
         const modeTag   = d.steelman_mode ? '<span class="pill-rapoport">Rapoport</span>' : '';
@@ -151,6 +154,7 @@ export async function loadHistory(offset = 0) {
           <td class="cell-meta">${esc(d.proposition_nickname || 'P')} vs ${esc(d.opposition_nickname || 'O')}</td>
           <td class="cell-meta">${esc(d.turn || 0)}</td>
           <td class="cell-tok">${formatTokens(d.total_tokens || 0)}</td>
+          <td class="cell-tok"${d.cost_partial ? ' title="some models in this run could not be priced — total is a minimum"' : ''}>${formatCost(d.total_cost_usd, d.cost_partial)}</td>
           <td>${modeTag}</td>
           <td><span class="pill ${statusCls}">${esc(d.status)}</span></td>
           <td class="col-check" onclick="event.stopPropagation()">
@@ -224,4 +228,24 @@ export async function loadHistory(offset = 0) {
     subtitle.textContent = 'error loading history';
     console.error(e);
   }
+}
+
+// Total recorded spend across the runs currently listed (this page of
+// results, not all history — the label says so). Hidden entirely when no
+// listed run has a price.
+function _renderSpendLine(debates) {
+  const el = document.getElementById('history-spend');
+  if (!el) return;
+  let total = null, partial = false;
+  for (const d of debates) {
+    if (d.total_cost_usd != null) {
+      total = (total ?? 0) + d.total_cost_usd;
+      if (d.cost_partial) partial = true;
+    } else if ((d.total_tokens || 0) > 0) {
+      partial = true;
+    }
+  }
+  if (total == null) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.textContent = `listed runs: ${formatCost(total, partial)}${partial ? ' (minimum — some runs unpriced)' : ''}`;
 }

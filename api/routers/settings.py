@@ -13,6 +13,7 @@ from dotenv import load_dotenv, set_key as dotenv_set_key
 from traceact import ActionTrace
 from providers import get_key_env, list_provider_names, test_key_async, list_models_async
 from core import runs_db as _runs_db
+from core.config import DEFAULT_MAX_TURNS
 
 # ------------------------------------------------------------------
 # Key validation cache — avoids an API round-trip on every page load.
@@ -33,8 +34,7 @@ async def _refresh_models_for_provider(provider: str, key: str, valid: bool) -> 
             models = await list_models_async(provider, key)
             _runs_db.upsert_provider_models(
                 conn, provider,
-                [{"model_id": m.model_id, "display_name": m.display_name, "endpoint_type": m.endpoint_type}
-                 for m in models],
+                [{"model_id": m.model_id, "display_name": m.display_name} for m in models],
             )
             t.output({"provider": provider, "model_count": len(models)})
         else:
@@ -47,7 +47,7 @@ async def _validate_all_keys(keys: dict) -> dict:
     """Validate all API keys concurrently; uses a 60 s per-value cache.
 
     On each validation, also refreshes the provider_models DB so the model
-    picker stays in sync with what each key can actually access.
+    picker stays in sync with what each key can reach.
     """
     now = time.time()
     result = {}
@@ -153,9 +153,6 @@ _FACTORY_DEFAULTS = {
         "moderator":   {"temperature": 0.3, "auto_generate_title": True},
         "synthesiser": {"temperature": 0.3},
     },
-    "openai": {
-        "responses_mode": "auto",
-    },
     "output": {
         "generate_markdown": True,
         "score_final_output": True,
@@ -164,7 +161,7 @@ _FACTORY_DEFAULTS = {
     "protocol": {
         "max_steelman_attempts": 2,
         "max_time_minutes": 15,
-        "max_turns": 20,
+        "max_turns": DEFAULT_MAX_TURNS,
         "min_challenges": 5,
         "min_concessions": 2,
         "repetition_tolerance": 2,
@@ -248,9 +245,27 @@ def _load_config() -> dict:
     return {}
 
 
+def _cost_snapshot_date():
+    """Date of the price snapshot behind every dollar figure, or None when
+    rates is unavailable. In a thread: the first call may load the ledger."""
+    from core import cost as _cost
+    return _cost.snapshot_date()
+
+
 def _total_tokens_from_runs() -> dict:
-    """Sum token usage across all debate DBs in runs/, respecting any reset event."""
-    totals = {"input_tokens": 0, "output_tokens": 0}
+    """Sum token usage and dollar spend across all debate DBs in runs/,
+    respecting any reset event.
+
+    Spend follows the same recorded-not-recomputed rule as everywhere else:
+    it sums acts.cost_usd, priced once at generation time. cost_usd is None
+    (never 0.0) when no act since the reset could be priced, and
+    cost_partial is True when any act with tokens carries no price — a run
+    DB from before the cost column existed counts as unpriced, not free.
+    """
+    totals = {
+        "input_tokens": 0, "output_tokens": 0,
+        "cost_usd": None, "cost_partial": False,
+    }
     if not RUNS_DIR.exists():
         return totals
     for run_dir in RUNS_DIR.iterdir():
@@ -264,10 +279,28 @@ def _total_tokens_from_runs() -> dict:
                 " WHERE timestamp > COALESCE("
                 "  (SELECT value FROM meta WHERE key='token_reset_event'), '')"
             ).fetchone()
-            conn.close()
-            if row and row[0]:
+            had_tokens = bool(row and row[0])
+            if had_tokens:
                 totals["input_tokens"] += row[0]
                 totals["output_tokens"] += (row[1] or 0)
+            try:
+                crow = conn.execute(
+                    "SELECT SUM(cost_usd),"
+                    " SUM(CASE WHEN cost_usd IS NULL"
+                    "          AND input_tokens + output_tokens > 0"
+                    "     THEN 1 ELSE 0 END)"
+                    " FROM acts WHERE timestamp > COALESCE("
+                    "  (SELECT value FROM meta WHERE key='token_reset_event'), '')"
+                ).fetchone()
+                if crow and crow[0] is not None:
+                    totals["cost_usd"] = (totals["cost_usd"] or 0.0) + crow[0]
+                if crow and crow[1]:
+                    totals["cost_partial"] = True
+            except sqlite3.OperationalError:
+                # Pre-cost-column DB: its acts exist but carry no price.
+                if had_tokens:
+                    totals["cost_partial"] = True
+            conn.close()
         except Exception:
             continue
     return totals
@@ -319,6 +352,11 @@ async def get_settings():
             "input":  raw_totals["input_tokens"],
             "output": raw_totals["output_tokens"],
         },
+        "cost_totals": {
+            "total_usd": raw_totals["cost_usd"],
+            "partial":   raw_totals["cost_partial"],
+            "prices_as_of": _cost_snapshot_date(),
+        },
         "env_path": str(Path(".env").resolve()),
         "platform": __import__("sys").platform,
         "key_warnings": _load_key_warnings(),
@@ -339,8 +377,6 @@ async def update_settings(updates: dict):
         if hw is not None:
             from agents.base import set_history_window
             set_history_window(hw)
-        from providers import configure as _configure_providers
-        _configure_providers(config)
         t.output({"status": "ok"})
     return {"status": "ok", "config": config}
 
@@ -452,6 +488,14 @@ async def list_models():
     provider_order = cfg.get("providers", {}).get("model_order")
     models = _runs_db.list_available_models(conn, provider_order=provider_order)
     conn.close()
+    # Price hints for the model picker, from the recorded-rates seam
+    # (core/cost.py). None when unpriced — the UI shows no hint rather
+    # than a wrong one.
+    from core import cost as _cost
+    for m in models:
+        price = _cost.price_for(m["provider"], m["model_id"])
+        m["input_mtok"] = price.input_mtok if price else None
+        m["output_mtok"] = price.output_mtok if price else None
     return {"models": models}
 
 
@@ -506,9 +550,9 @@ async def random_topic():
 
     domain = random.choice(_TOPIC_DOMAINS)
     prompt = (
-        f"Generate exactly one short, specific, debatable proposition in the domain of: {domain}. "
+        f"Generate a single short, specific, debatable proposition in the domain of: {domain}. "
         "Requirements: suitable for a structured academic debate, under 20 words, falsifiable, "
-        "genuinely controversial (reasonable people could sincerely argue either side), "
+        "truly controversial (reasonable people could sincerely argue either side), "
         "and phrased as a positive claim (e.g. 'X should Y' or 'X is Z'). "
         "Return only the proposition. No preamble, no quotation marks, no full stop at the end."
     )
@@ -526,13 +570,12 @@ async def random_topic():
     for model_row in available:
         prov  = model_row["provider"]
         mid   = model_row["model_id"]
-        etype = model_row["endpoint_type"]
         key   = (os.environ.get(_providers.get_key_env(prov)) or "").strip()
         if not key:
             continue
         try:
             text, _, _ = _providers.generate(
-                provider=prov, key=key, model_id=mid, endpoint_type=etype,
+                provider=prov, key=key, model_id=mid,
                 system="", user=prompt, temperature=0.9, max_tokens=60,
             )
             topic = text.strip().strip('"').strip("'").strip()

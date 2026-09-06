@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from agents.base import BaseAgent
 from core.state import Act, DialogueState
+from core import cost as _cost
 
 _CITATION_RE = re.compile(
     r'(?:[A-Z][a-z]+ et al|[A-Z][a-z]+ \(\d{4}\)'
@@ -87,7 +88,8 @@ OUTPUT FORMAT — STATUS (no other text, no markdown fences):
 OUTPUT FORMAT — CLOSE (no other text, no markdown fences):
 {
   "act_type": "CLOSE",
-  "closure_reason": "max_turns" | "max_time" | "token_budget" | "challenge_rate_floor" | "mutual_agreement" | "repetition_loop",
+  "closure_reason": "max_turns" | "max_time" | "token_budget" | "challenge_rate_floor" | "mutual_agreement" | "repetition_loop" | "user_requested_end",
+  Copy the runner's closure_reason from the dialogue state verbatim when it supplies one — never substitute a different label (a user-requested end is "user_requested_end", not "mutual_agreement").
   "closure_summary": "string (one paragraph explaining why the debate closed now)",
   "surviving_claims": ["claim_id", ...],
   "revised_claims": ["claim_id", ...],
@@ -109,8 +111,7 @@ class ModeratorAgent(BaseAgent):
 
     def __init__(self, nickname: str = "Moderator", model: str = "claude-opus-4-8",
                  temperature: float = 0.2, max_turns: int = 15,
-                 token_budget: int = 40_000, config: dict = None, provider: str = "",
-                 endpoint_type: str = "default"):
+                 token_budget: int = 40_000, config: dict = None, provider: str = ""):
         super().__init__(
             role="moderator",
             nickname=nickname,
@@ -118,10 +119,14 @@ class ModeratorAgent(BaseAgent):
             temperature=temperature,
             config=config or {},
             provider=provider,
-            endpoint_type=endpoint_type,
         )
         self._max_turns = max_turns
         self._token_budget = token_budget
+
+    # Turn cards shown per prompt. Earlier acts are carried by the chapter
+    # summaries injected above the cards; without the bound the moderator's
+    # input grows linearly with the transcript.
+    _TURN_CARD_WINDOW = 40
 
     def generate(self, state: DialogueState, should_close: bool = False, closure_reason: str = None) -> Act:
         """Generate STATUS or CLOSE act based on current state and termination signal.
@@ -157,13 +162,27 @@ class ModeratorAgent(BaseAgent):
             else None
         )
 
+        # Quote/paraphrase pairs from the latest substantive act, with their
+        # mechanical check results — the moderator's view of the quote
+        # contract. Semantic referent distortion is the opposition's duty; the
+        # moderator surfaces the mechanical outcomes in its STATUS note.
+        citation_checks = [
+            {
+                "url": c.get("url", ""),
+                "quote": self._sanitize(c.get("quote", ""))[:300],
+                "status": c.get("status", "unchecked"),
+                "ungrounded_numbers": c.get("ungrounded_numbers", []),
+            }
+            for c in (getattr(last_substantive, "citations", None) or [])
+        ] if last_substantive else []
+
         dialogue_state_json = json.dumps({
             "topic": self._sanitize(state.topic),
             "turn": state.turn,
             "max_turns": self._max_turns,
             "total_tokens": total_tokens,
             "token_budget": self._token_budget,
-            "outstanding_challenges": list(state.outstanding_challenges),
+            "outstanding_challenges": self._bounded_challenges(state),
             "claims": {
                 cid: {
                     "author": c.author,
@@ -175,6 +194,7 @@ class ModeratorAgent(BaseAgent):
             "should_close": should_close,
             "closure_reason": closure_reason,
             "sourcing_warning": sourcing_warning,
+            "latest_citation_checks": citation_checks,
         }, indent=2)
 
         _CLOSURE_LABELS = {
@@ -211,15 +231,15 @@ class ModeratorAgent(BaseAgent):
 <dialogue_state>
 {dialogue_state_json}
 </dialogue_state>
-<turn_cards>
-{self._format_turn_cards(state)}
+{self._format_chapters(state)}<turn_cards>
+{self._format_turn_cards(state, limit=self._TURN_CARD_WINDOW)}
 </turn_cards>
 <latest_acts>
 {chr(10).join(recent_lines) or "(no acts yet)"}
 </latest_acts>
 </debate_data>
 
-Your role is moderator. Emit exactly one JSON object (STATUS or CLOSE). No other text.{close_directive}\
+Your role is moderator. Emit a single JSON object (STATUS or CLOSE). No other text.{close_directive}\
 """
         return _SYSTEM, user
 
@@ -252,4 +272,5 @@ Your role is moderator. Emit exactly one JSON object (STATUS or CLOSE). No other
             output_tokens=output_tokens,
             model_used=self.model,
             timestamp=datetime.utcnow().isoformat(),
+            cost_usd=_cost.cost_usd(self._provider, self.model, input_tokens, output_tokens),
         )

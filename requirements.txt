@@ -3,11 +3,11 @@ uvicorn[standard]
 python-dotenv
 pyyaml
 pydantic
-anthropic
-openai
-google-genai
 pytest
 httpx
 python-multipart
 trafilatura
-traceact>=0.14.0
+traceact>=1.0.0
+keycall>=1.0.0
+rates>=0.0.4
+shiplock>=0.3.0

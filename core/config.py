@@ -6,7 +6,27 @@ all fields are typed and IDE-navigable.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from pathlib import Path
 import json
+import yaml
+
+_DEFAULTS_YAML_PATH = Path(__file__).parent.parent / "config" / "defaults.yaml"
+
+# The one Python-level literal for max_turns in the whole codebase. Every
+# other fallback below derives from config/defaults.yaml at read time — this
+# number only fires if that file is missing or malformed, and must be kept in
+# sync with its protocol.max_turns by hand. The ceiling is set high on
+# purpose: tokens, not turn count, are meant to be what ends a debate.
+DEFAULT_MAX_TURNS = 100
+
+
+def _configured_max_turns() -> int:
+    try:
+        with open(_DEFAULTS_YAML_PATH) as f:
+            data = yaml.safe_load(f) or {}
+        return int(data.get("protocol", {}).get("max_turns", DEFAULT_MAX_TURNS))
+    except Exception:
+        return DEFAULT_MAX_TURNS
 
 
 @dataclass(frozen=True)
@@ -15,19 +35,18 @@ class AgentRunConfig:
     temperature: float
     nickname: str
     aggression: float = 0.8  # only meaningful for opposition
-    # Who serves this model and over which endpoint. Resolved once against the
-    # provider_models registry when the debate is created, then carried for the
-    # life of the run. A model id alone is not a routable address: the same id
-    # can be served by several providers (kimi-k3 direct from Moonshot and
-    # resold by Perplexity are different endpoints, keys, and prices), so the
+    # Who serves this model. Resolved once against the provider_models
+    # registry when the debate is created, then carried for the life of the
+    # run. A model id alone is not a routable address: the same id can be
+    # served by several providers (kimi-k3 direct from Moonshot and resold
+    # by Perplexity are different endpoints, keys, and prices), so the
     # provider is part of the selection, not something to re-derive later.
     provider: str | None = None
-    endpoint_type: str = "default"
 
 
 @dataclass(frozen=True)
 class ProtocolRunConfig:
-    max_turns: int = 15
+    max_turns: int = field(default_factory=_configured_max_turns)
     max_time_minutes: int = 30
     token_budget: int = 40_000
     min_challenges: int = 3
@@ -97,7 +116,7 @@ class DebateRunConfig:
                 nickname="Synthesis",
             ),
             protocol=ProtocolRunConfig(
-                max_turns=getattr(c, "max_turns", 8),
+                max_turns=getattr(c, "max_turns", None) or _configured_max_turns(),
                 max_time_minutes=getattr(c, "max_time_minutes", 15),
                 token_budget=getattr(c, "token_budget", 100_000),
                 min_challenges=getattr(c, "min_challenges", 2),
@@ -129,14 +148,12 @@ class DebateRunConfig:
             proposition=AgentRunConfig(
                 model=d.get("proposition_model") or None,
                 provider=d.get("proposition_provider") or None,
-                endpoint_type=d.get("proposition_endpoint_type") or "default",
                 temperature=d.get("temperature_proposition", 0.7),
                 nickname=d.get("proposition_nickname", "Thesis"),
             ),
             opposition=AgentRunConfig(
                 model=d.get("opposition_model") or None,
                 provider=d.get("opposition_provider") or None,
-                endpoint_type=d.get("opposition_endpoint_type") or "default",
                 temperature=d.get("temperature_opposition", 0.4),
                 nickname=d.get("opposition_nickname", "Antithesis"),
                 aggression=d.get("aggression", 0.8),
@@ -144,19 +161,17 @@ class DebateRunConfig:
             moderator=AgentRunConfig(
                 model=d.get("moderator_model") or None,
                 provider=d.get("moderator_provider") or None,
-                endpoint_type=d.get("moderator_endpoint_type") or "default",
                 temperature=d.get("temperature_moderator", 0.3),
                 nickname="Moderator",
             ),
             synthesiser=AgentRunConfig(
                 model=d.get("synthesiser_model") or None,
                 provider=d.get("synthesiser_provider") or None,
-                endpoint_type=d.get("synthesiser_endpoint_type") or "default",
                 temperature=d.get("temperature_synthesiser", 0.3),
                 nickname="Synthesis",
             ),
             protocol=ProtocolRunConfig(
-                max_turns=proto.get("max_turns", 8),
+                max_turns=proto.get("max_turns") or _configured_max_turns(),
                 max_time_minutes=proto.get("max_time_minutes", 15),
                 token_budget=proto.get("token_budget", 100_000),
                 min_challenges=proto.get("min_challenges", 2),
@@ -169,8 +184,8 @@ class DebateRunConfig:
     def to_json(self) -> str:
         """Serialise for storage in the sessions.config column.
 
-        Records the resolved provider and endpoint alongside each model, so the
-        run says exactly which vendor served it. Re-deriving that later from the
+        Records the resolved provider alongside each model, so the run says
+        the precise vendor that served it. Re-deriving that later from the
         registry would give a different answer once the registry changes.
         """
         payload = {
@@ -205,5 +220,4 @@ class DebateRunConfig:
         for role in ("proposition", "opposition", "moderator", "synthesiser"):
             agent = getattr(self, role)
             payload[f"{role}_provider"] = agent.provider
-            payload[f"{role}_endpoint_type"] = agent.endpoint_type
         return json.dumps(payload)

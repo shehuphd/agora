@@ -10,7 +10,7 @@ from typing import Any
 
 from traceact import ActionTrace
 from core.config import DebateRunConfig
-from core.state import DialogueState, TokenUsage, apply_act, legal_acts_for
+from core.state import DialogueState, TokenUsage, apply_act, lapse_stale_challenges, legal_acts_for
 from core.grammar import validate_act
 from core.termination import check_termination
 from core.checkpoint import init_db, checkpoint
@@ -19,7 +19,7 @@ from agents.proposition import PropositionAgent
 from agents.opposition import OppositionAgent
 from agents.moderator import ModeratorAgent
 from agents.synthesiser import SynthesiserAgent
-from agents.base import QuotaExhaustedError
+from agents.base import KeyCallError, AgentResponseError
 
 _WARNINGS_PATH = Path(__file__).parent.parent / "config" / "key_warnings.json"
 
@@ -29,12 +29,18 @@ def _retire_unknown_model(agent, exc: Exception) -> None:
 
     Only fires on the provider's own "unknown model" verdict — never on rate
     limits, auth, or transient failures, which say nothing about whether the
-    model is real.
+    model exists. KeyCallError carries this as a typed code
+    (MODEL_NOT_AVAILABLE); any other exception falls back to the old
+    string check, kept for whatever isn't routed through keycall yet.
     """
-    low = str(exc).lower()
-    if not ("model_not_found" in low or "invalid model" in low
-            or "does not exist" in low or "invalid_model" in low):
-        return
+    if isinstance(exc, KeyCallError):
+        if exc.code.name != "MODEL_NOT_AVAILABLE":
+            return
+    else:
+        low = str(exc).lower()
+        if not ("model_not_found" in low or "invalid model" in low
+                or "does not exist" in low or "invalid_model" in low):
+            return
     try:
         idx = _runs_db.connect()
         _runs_db.mark_model_unservable(idx, agent._provider, agent.model)
@@ -62,7 +68,11 @@ def _write_quota_warning(provider: str) -> None:
 # SSE stream indefinitely. The user sees a timeout error; they can retry.
 # A debater turn is now retrieval (~10-20s of provider-side web search) plus
 # composition plus a possible JSON-repair retry, all inside this one limit.
-_AGENT_TIMEOUT = 180.0  # seconds
+# Sized above the transport read timeout (providers/keycall_backend.py:
+# _READ_TIMEOUT, 240s) so the transport's typed, retryable error fires first;
+# kimi-k3 measurably spends over 150s of reasoning on a mid-debate prompt, so
+# both limits sit well above that.
+_AGENT_TIMEOUT = 300.0  # seconds
 
 
 async def run_debate(
@@ -77,8 +87,15 @@ async def run_debate(
     turn_idx_start: int = 0,
     continued_from: str | None = None,
     experiment_name: str | None = None,
+    condition: str | None = None,
+    unattended: bool = False,
 ):
-    """Entry point: initialise DB + state, build agents, run orchestrator."""
+    """Entry point: initialise DB + state, build agents, run orchestrator.
+
+    unattended=True means nobody is watching to click Resume (batch rows),
+    so failures that would pause an interactive debate fail the run instead
+    — a paused batch row would hold its concurrency slot forever.
+    """
     with ActionTrace.start(
         action="debate.run",
         kind="app",
@@ -102,14 +119,14 @@ async def run_debate(
             overrides=overrides, force_close_event=force_close_event,
             initial_state=initial_state, turn_idx_start=turn_idx_start,
             continued_from=continued_from, experiment_name=experiment_name,
-            debate_trace=debate_trace,
+            condition=condition, unattended=unattended, debate_trace=debate_trace,
         )
 
 
 async def _run_debate_inner(
     run_id, config, run_dir, event_queue, pause_event, overrides,
     force_close_event, initial_state, turn_idx_start, continued_from,
-    experiment_name, debate_trace,
+    experiment_name, condition, unattended, debate_trace,
 ):
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(config.to_json())
@@ -154,6 +171,7 @@ async def _run_debate_inner(
             opposition_nickname=config.opposition.nickname,
             continued_from=continued_from,
             config_json=config.to_json(),
+            condition=condition,
         )
         idx.close()
     except Exception as exc:
@@ -241,7 +259,6 @@ async def _run_debate_inner(
         nickname=config.proposition.nickname,
         model=config.proposition.model,
         provider=config.proposition.provider,
-        endpoint_type=config.proposition.endpoint_type,
         temperature=config.proposition.temperature,
         config={},
     )
@@ -253,7 +270,6 @@ async def _run_debate_inner(
         min_challenges=config.protocol.min_challenges,
         min_concessions=config.protocol.min_concessions,
         provider=config.opposition.provider,
-        endpoint_type=config.opposition.endpoint_type,
         config={},
     )
     moderator = ModeratorAgent(
@@ -263,13 +279,11 @@ async def _run_debate_inner(
         max_turns=config.protocol.max_turns,
         token_budget=config.protocol.token_budget,
         provider=config.moderator.provider,
-        endpoint_type=config.moderator.endpoint_type,
         config={},
     )
     synthesiser = SynthesiserAgent(
         model=config.synthesiser.model,
         provider=config.synthesiser.provider,
-        endpoint_type=config.synthesiser.endpoint_type,
         temperature=config.synthesiser.temperature,
         config={},
     )
@@ -293,6 +307,7 @@ async def _run_debate_inner(
         force_close_event=force_close_event,
         turn_idx_start=turn_idx_start,
         continued_from=continued_from,
+        unattended=unattended,
     )
     await orchestrator.run()
     debate_trace.output({
@@ -326,6 +341,7 @@ class TurnOrchestrator:
         force_close_event: asyncio.Event | None = None,
         turn_idx_start: int = 0,
         continued_from: str | None = None,
+        unattended: bool = False,
     ):
         self.state = state
         self.agents = agents
@@ -343,12 +359,76 @@ class TurnOrchestrator:
         self._loop = asyncio.get_running_loop()
         self._turn_idx_start = turn_idx_start
         self._continued_from = continued_from
+        # Nobody watches an unattended run (a batch row), so failures that
+        # would pause an interactive debate fail the run instead — a paused
+        # batch row would hold its concurrency slot forever.
+        self._unattended = unattended
         # Set when a run stops on a failure rather than a protocol
         # termination, so the final status reflects that.
         self._failed = False
+        # Whole-turn token totals for the most recent turns, newest last.
+        # Feeds the projected-overrun check: a turn is not launched when the
+        # budget can't plausibly cover it.
+        self._turn_token_history: list[int] = []
 
     def _effective_token_budget(self) -> int:
         return self._overrides.get("token_budget", self.config.protocol.token_budget)
+
+    def _spent_tokens(self) -> int:
+        return sum(u.input_tokens + u.output_tokens for u in self.state.token_usage.values())
+
+    def _projected_over_budget(self) -> bool:
+        """Whether launching another turn would plausibly overrun the budget.
+
+        check_termination stops a debate only once spend has already crossed
+        the budget, which lets one heavy final turn overshoot it (a 50k run
+        finished at 62k this way, 2026-09-05). Project the next turn as the
+        larger of the last two whole-turn totals — turns alternate seats, so
+        one turn back is the other seat — and close ahead of it instead.
+        Never fires before any full turn has been measured.
+
+        The projection carries a retry margin of one retry on that heaviest
+        turn (i.e. it is doubled): a JSON-repair retry re-bills a full call
+        after the launch decision, so a plain last-two projection undercounts
+        any turn that needs one. Measured 2026-09-06: an 80k run closed at
+        112% when a projected-11k turn took two retries and cost 31k."""
+        if not self._turn_token_history:
+            return False
+        projected = 2 * max(self._turn_token_history[-2:])
+        return self._spent_tokens() + projected > self._effective_token_budget()
+
+    def _final_cost(self) -> tuple[float | None, bool]:
+        """Dollar cost of the whole run, summed from each act's own cost_usd
+        — priced once, per act, at generation time (agents/base.py) against
+        the exact tokens and (provider, model) that produced it. Not
+        re-derived here, so this can never disagree with the per-act costs
+        the run pack shows.
+
+        Returns (total_usd, partial). total_usd is None only when nothing in
+        the run could be priced. partial is True when at least one act
+        couldn't be priced — the sum then understates the true cost.
+        """
+        total = 0.0
+        priced_any = False
+        partial = False
+        for act in self.state.acts:
+            if act.cost_usd is None:
+                partial = True
+            else:
+                total += act.cost_usd
+                priced_any = True
+        # Auxiliary calls (chapter and epoch summaries) produce no act but
+        # are priced at call time onto state; the run total includes them.
+        aux = getattr(self.state, "aux_cost_usd", 0.0)
+        if aux:
+            total += aux
+            priced_any = True
+        return (total if priced_any else None), partial
+
+    # Chapter-list cap: past this, the oldest half collapses into one epoch
+    # summary (see _maybe_summarise_chapter), keeping the summaries themselves
+    # from growing without bound on very long runs.
+    _MAX_CHAPTERS = 10
 
     async def _maybe_summarise_chapter(self) -> None:
         """Every K debater turns (agent_settings.chapter_every, 0 = off), have
@@ -368,11 +448,45 @@ class TurnOrchestrator:
         start = self.state.turn - k + 1
         if any(f"[Turns {start}-" in c for c in chapters):
             return  # already summarised (e.g. after a pause/resume on the same turn)
-        summary = await self._loop.run_in_executor(
-            None, self.synthesiser.summarise_chapter, self.state, start, self.state.turn,
-        )
+        # The same hard timeout every agent call gets. Without it, one hung
+        # provider connection inside a chapter call freezes the whole run
+        # (observed live 2026-09-05: a run wedged for two hours at turn 50
+        # inside this call). On timeout the chapter is skipped; the debate
+        # loses summary detail, never the run.
+        try:
+            summary = await asyncio.wait_for(
+                self._loop.run_in_executor(
+                    None, self.synthesiser.summarise_chapter,
+                    self.state, start, self.state.turn,
+                ),
+                timeout=_AGENT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print(f"[runner] chapter summary timed out after {_AGENT_TIMEOUT:.0f}s "
+                  f"(turns {start}-{self.state.turn}) — skipped", flush=True)
+            return
         if summary:
             chapters.append(summary)
+        # Chapters are themselves bounded: past the cap, the oldest half
+        # collapses into one epoch summary, so debater context stays
+        # fixed-size no matter how long the run gets. A failed epoch call
+        # leaves the list as-is; the collapse retries at the next chapter.
+        if len(chapters) > self._MAX_CHAPTERS:
+            half = len(chapters) // 2
+            try:
+                epoch = await asyncio.wait_for(
+                    self._loop.run_in_executor(
+                        None, self.synthesiser.summarise_epoch,
+                        self.state, chapters[:half],
+                    ),
+                    timeout=_AGENT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                print(f"[runner] epoch summary timed out after {_AGENT_TIMEOUT:.0f}s "
+                      f"— collapse retries at the next chapter", flush=True)
+                return
+            if epoch:
+                self.state.chapters = [epoch] + chapters[half:]
 
     async def _wait_if_paused(self) -> None:
         if not self._pause_event.is_set():
@@ -420,54 +534,92 @@ class TurnOrchestrator:
                         "agent_role": agent.role,
                     })
 
-                    await self.event_queue.put({"type": "thinking", "agent": agent.nickname, "role": agent.role})
-                    act = None
-                    try:
-                        act = await self._call(agent.generate, self.state)
-                        validate_act(self.state, act.act_type)
-                    except asyncio.TimeoutError:
-                        turn_trace.step(f"timeout: {agent.role} after {_AGENT_TIMEOUT:.0f}s")
-                        turn_trace.output({"error": "timeout", "agent_role": agent.role})
-                        self._failed = True
-                        self.state.closure_reason = f"timeout_{agent.role}"
-                        await self.event_queue.put({
-                            "type": "error",
-                            "message": f"{agent.role} ({agent.model}) timed out after "
-                                       f"{_AGENT_TIMEOUT:.0f}s — the provider may be "
-                                       f"overloaded. The debate has stopped; you can rerun it.",
-                        })
-                        break
-                    except QuotaExhaustedError as e:
-                        turn_trace.step(f"quota_exhausted: {e.provider}")
-                        turn_trace.output({"error": "quota_exhausted", "provider": e.provider})
-                        _write_quota_warning(e.provider)
-                        self._failed = True
-                        self.state.closure_reason = f"quota_exhausted_{e.provider}"
-                        await self.event_queue.put({"type": "error", "message": _friendly_quota_error(e.provider)})
-                        break
-                    except Exception as e:
-                        turn_trace.step(f"agent_error: {type(e).__name__}")
-                        turn_trace.output({"error": str(e), "agent_role": agent.role})
-                        print(f"[runner] {agent.role.upper()} ERROR ({agent.model}): {e}\n{traceback.format_exc()}", flush=True)
-                        _retire_unknown_model(agent, e)
-                        # Recorded so history and the run pack can say why the
-                        # run stopped, rather than only that it did.
-                        self._failed = True
-                        self.state.closure_reason = f"{agent.role}_error"
-                        label = f"{agent.role} ({agent.model}): "
-                        await self.event_queue.put({"type": "error", "message": label + _friendly_error(e)})
-                        break
+                    spent_at_turn_start = self._spent_tokens()
 
-                    turn_trace.step(f"agent: {act.act_type}")
-                    apply_act(self.state, act)
-                    checkpoint(self.conn, self.state, act, self.run_dir)
-                    await self.event_queue.put(_act_to_dict(act))
-                    await asyncio.sleep(0.7)
+                    # Failure paths below no longer break out of the loop:
+                    # they record the reason and fall through, so the run
+                    # still gets a moderator close where possible and an
+                    # argument map either way — a debate that died at turn 8
+                    # still has 8 turns of record to map. skip_debater
+                    # covers the projected-overrun close, where the turn is
+                    # never launched at all.
+                    skip_debater = self._projected_over_budget()
+                    if skip_debater:
+                        turn_trace.step("termination: token_budget (projected)")
+
+                    act = None
+                    if not skip_debater:
+                        await self.event_queue.put({"type": "thinking", "agent": agent.nickname, "role": agent.role})
+                        try:
+                            act = await self._call_with_pause_on_failure(agent.generate, self.state)
+                            validate_act(self.state, act.act_type)
+                        except asyncio.TimeoutError:
+                            act = None
+                            turn_trace.step(f"timeout: {agent.role} after {_AGENT_TIMEOUT:.0f}s")
+                            turn_trace.output({"error": "timeout", "agent_role": agent.role})
+                            self._failed = True
+                            self.state.closure_reason = f"timeout_{agent.role}"
+                            await self.event_queue.put({
+                                "type": "error",
+                                "message": f"{agent.role} ({agent.model}) timed out after "
+                                           f"{_AGENT_TIMEOUT:.0f}s — the provider may be "
+                                           f"overloaded. The debate is closing with what it has.",
+                            })
+                        except KeyCallError as e:
+                            # A generate that returned but failed validation
+                            # leaves act assigned; it must not be applied.
+                            act = None
+                            if e.code.name == "PERMISSION_DENIED":
+                                turn_trace.step(f"quota_exhausted: {agent._provider}")
+                                turn_trace.output({"error": "quota_exhausted", "provider": agent._provider})
+                                _write_quota_warning(agent._provider)
+                                self._failed = True
+                                self.state.closure_reason = f"quota_exhausted_{agent._provider}"
+                                await self.event_queue.put({"type": "error", "message": _friendly_quota_error(agent._provider)})
+                            else:
+                                turn_trace.step(f"agent_error: {e.code.name}")
+                                turn_trace.output({"error": e.message, "agent_role": agent.role})
+                                print(f"[runner] {agent.role.upper()} ERROR ({agent.model}): {e.code.name} — {e.message}", flush=True)
+                                _retire_unknown_model(agent, e)
+                                self._failed = True
+                                self.state.closure_reason = f"{agent.role}_error"
+                                await self.event_queue.put({"type": "error", "message": f"{agent.role} ({agent.model}): {e.message}"})
+                        except Exception as e:
+                            act = None
+                            turn_trace.step(f"agent_error: {type(e).__name__}")
+                            turn_trace.output({"error": str(e), "agent_role": agent.role})
+                            print(f"[runner] {agent.role.upper()} ERROR ({agent.model}): {e}\n{traceback.format_exc()}", flush=True)
+                            _retire_unknown_model(agent, e)
+                            # Recorded so history and the run pack can say why the
+                            # run stopped, rather than only that it did.
+                            self._failed = True
+                            self.state.closure_reason = f"{agent.role}_error"
+                            label = f"{agent.role} ({agent.model}): "
+                            await self.event_queue.put({"type": "error", "message": label + _friendly_error(e)})
+
+                    if act is not None:
+                        turn_trace.step(f"agent: {act.act_type}")
+                        apply_act(self.state, act)
+                        # Retire challenges the debate has moved past
+                        # (defended, then no opposition follow-up for N
+                        # turns) so prompts stop growing with them.
+                        lapsed = lapse_stale_challenges(self.state)
+                        if lapsed:
+                            turn_trace.step(f"challenges.lapsed: {len(lapsed)}")
+                        checkpoint(self.conn, self.state, act, self.run_dir)
+                        await self.event_queue.put(_act_to_dict(act))
+                        await asyncio.sleep(0.7)
 
                     # Build effective termination config (may differ from original if budget overridden)
                     term_cfg = self.config.to_termination_dict()
                     term_cfg["protocol"]["token_budget"] = self._effective_token_budget()
                     should_close, closure_reason = check_termination(self.state, term_cfg)
+                    if skip_debater:
+                        should_close, closure_reason = True, "token_budget"
+                    elif act is None:
+                        # The debater failed: close with the recorded reason.
+                        should_close = True
+                        closure_reason = self.state.closure_reason
 
                     # User clicked "end debate" — override termination regardless of turn count.
                     if self._force_close_event.is_set():
@@ -488,7 +640,7 @@ class TurnOrchestrator:
                             self.moderator.generate, self.state,
                             should_close=should_close, closure_reason=closure_reason,
                         )
-                        mod_act = await self._call(mod_fn)
+                        mod_act = await self._call_with_pause_on_failure(mod_fn)
                         apply_act(self.state, mod_act)
                         checkpoint(self.conn, self.state, mod_act, self.run_dir)
                         await self.event_queue.put(_act_to_dict(mod_act))
@@ -498,18 +650,31 @@ class TurnOrchestrator:
                         if mod_act.act_type == "CLOSE":
                             should_close = True
                         turn_trace.step(f"moderator: {mod_act.act_type}")
-                    except QuotaExhaustedError as e:
-                        turn_trace.step(f"moderator_quota_exhausted: {e.provider}")
-                        _write_quota_warning(e.provider)
-                        print(f"[runner] MODERATOR QUOTA ERROR: {e}", flush=True)
-                        await self.event_queue.put({
-                            "type": "error",
-                            "message": f"Moderator: {_friendly_quota_error(e.provider)}",
-                        })
-                        should_close = True
-                        self._failed = True
-                        if not self.state.closure_reason:
-                            self.state.closure_reason = f"quota_exhausted_{e.provider}"
+                    except KeyCallError as e:
+                        if e.code.name == "PERMISSION_DENIED":
+                            turn_trace.step(f"moderator_quota_exhausted: {self.moderator._provider}")
+                            _write_quota_warning(self.moderator._provider)
+                            print(f"[runner] MODERATOR QUOTA ERROR: {e.message}", flush=True)
+                            await self.event_queue.put({
+                                "type": "error",
+                                "message": f"Moderator: {_friendly_quota_error(self.moderator._provider)}",
+                            })
+                            should_close = True
+                            self._failed = True
+                            if not self.state.closure_reason:
+                                self.state.closure_reason = f"quota_exhausted_{self.moderator._provider}"
+                        else:
+                            turn_trace.step(f"moderator_error: {e.code.name}")
+                            print(f"[runner] MODERATOR ERROR: {e.code.name} — {e.message}", flush=True)
+                            _retire_unknown_model(self.moderator, e)
+                            await self.event_queue.put({
+                                "type": "error",
+                                "message": f"moderator ({self.moderator.model}): {e.message}",
+                            })
+                            should_close = True
+                            self._failed = True
+                            if not self.state.closure_reason:
+                                self.state.closure_reason = "moderator_error"
                     except Exception as e:
                         turn_trace.step(f"moderator_error: {type(e).__name__}")
                         print(f"[runner] MODERATOR ERROR: {e}\n{traceback.format_exc()}", flush=True)
@@ -526,18 +691,25 @@ class TurnOrchestrator:
                     if should_close:
                         await self.event_queue.put({"type": "thinking", "agent": "Synthesis", "role": "synthesiser"})
                         try:
-                            synth_act = await self._call(self.synthesiser.generate, self.state)
+                            synth_act = await self._call_with_pause_on_failure(self.synthesiser.generate, self.state)
                             apply_act(self.state, synth_act)
                             checkpoint(self.conn, self.state, synth_act, self.run_dir)
                             await self.event_queue.put(_act_to_dict(synth_act))
                             turn_trace.step(f"synthesiser: {synth_act.act_type}")
-                        except QuotaExhaustedError as e:
-                            turn_trace.step(f"synthesiser_quota_exhausted: {e.provider}")
-                            _write_quota_warning(e.provider)
-                            await self.event_queue.put({
-                                "type": "error",
-                                "message": f"Synthesiser: {_friendly_quota_error(e.provider)}",
-                            })
+                        except KeyCallError as e:
+                            if e.code.name == "PERMISSION_DENIED":
+                                turn_trace.step(f"synthesiser_quota_exhausted: {self.synthesiser._provider}")
+                                _write_quota_warning(self.synthesiser._provider)
+                                await self.event_queue.put({
+                                    "type": "error",
+                                    "message": f"Synthesiser: {_friendly_quota_error(self.synthesiser._provider)}",
+                                })
+                            else:
+                                turn_trace.step(f"synthesiser_error: {e.code.name}")
+                                await self.event_queue.put({
+                                    "type": "error",
+                                    "message": f"synthesiser ({self.synthesiser.model}): {e.message}",
+                                })
                         except Exception as e:
                             turn_trace.step(f"synthesiser_error: {type(e).__name__}")
                             await self.event_queue.put({
@@ -557,6 +729,9 @@ class TurnOrchestrator:
                         "mod_act": mod_act.act_type if mod_act else None,
                         "closed": False,
                     })
+
+                self._turn_token_history.append(self._spent_tokens() - spent_at_turn_start)
+                del self._turn_token_history[:-3]
 
                 await self._maybe_summarise_chapter()
                 turn_idx += 1
@@ -583,6 +758,7 @@ class TurnOrchestrator:
                     u.input_tokens + u.output_tokens
                     for u in self.state.token_usage.values()
                 )
+                total_cost, cost_partial = self._final_cost()
                 idx = _runs_db.connect()
                 _runs_db.update_on_close(
                     idx,
@@ -592,10 +768,16 @@ class TurnOrchestrator:
                     debate_title=self.state.debate_title or "",
                     turn=self.state.turn,
                     total_tokens=final_tokens,
+                    total_cost_usd=total_cost,
+                    cost_partial=cost_partial,
                 )
                 idx.close()
             except Exception as exc:
                 print(f"[runs_db] update_on_close failed: {exc}", flush=True)
+            # Metrics are computed from the just-updated index row plus the
+            # run's own files; compute_and_store never raises.
+            from core import metrics as _metrics
+            _metrics.compute_and_store(self.state.run_id, self.run_dir)
             await self.event_queue.put(None)
 
     async def _call(self, fn: Any, *args: Any) -> Any:
@@ -605,6 +787,67 @@ class TurnOrchestrator:
             self._loop.run_in_executor(None, callable_),
             timeout=_AGENT_TIMEOUT,
         )
+
+    async def _call_with_pause_on_failure(self, fn: Any, *args: Any) -> Any:
+        """Like _call, but recoverable failures pause the debate for a human
+        instead of killing the run.
+
+        Three failure classes pause here, all retried on resume through the
+        existing pause/resume primitive (same event, same "paused"/"resumed"
+        SSE events, same /pause /resume endpoints):
+
+        - AgentResponseError: the model never produced a usable response —
+          agents/base.py's own bounded correction retries are exhausted.
+        - Transient provider failures: any KeyCallError keycall itself marks
+          retryable (timeout, rate limit, provider unavailable, network) —
+          waiting is the cure, and a human decides how long to wait.
+        - Human-fixable credential failures: PERMISSION_DENIED (a spend limit
+          or quota) and INVALID_API_KEY. Both are curable in Settings without
+          restarting: keys are re-read from the environment on every call, so
+          fixing the key or limit and clicking Resume continues the run. A
+          quota pause still writes the Settings warning badge on the way.
+
+        Everything else (model not found, unsupported operation, a hard call
+        timeout in unattended mode) propagates to the caller's error
+        handling. Unattended runs (batch rows) never pause at all — nobody
+        is there to resume them, and a paused row would hold its batch
+        concurrency slot forever; they propagate every failure and rely on
+        the batch retry mechanism instead.
+
+        If the human clicks "End debate" while paused, /end sets both
+        events, and the error propagates rather than looping forever.
+        """
+        while True:
+            try:
+                return await self._call(fn, *args)
+            except AgentResponseError as e:
+                if self._unattended:
+                    raise
+                print(f"[runner] AGENT RESPONSE RETRIES EXHAUSTED: {e}", flush=True)
+                await self._pause_for_failure(
+                    f"{e} — debate paused for review. Resume to retry, or end the debate."
+                )
+                if self._force_close_event.is_set():
+                    raise
+            except KeyCallError as e:
+                fixable = e.code.name in ("PERMISSION_DENIED", "INVALID_API_KEY")
+                if self._unattended or not (e.retryable or fixable):
+                    raise
+                if e.code.name == "PERMISSION_DENIED" and e.provider:
+                    _write_quota_warning(e.provider)
+                print(f"[runner] PROVIDER FAILURE ({e.code.name}): {e.message}", flush=True)
+                hint = ("fix the key or limit in Settings, then Resume to retry"
+                        if fixable else "Resume to retry once the provider recovers")
+                await self._pause_for_failure(
+                    f"{_friendly_error(e)} — debate paused; {hint}, or end the debate."
+                )
+                if self._force_close_event.is_set():
+                    raise
+
+    async def _pause_for_failure(self, message: str) -> None:
+        await self.event_queue.put({"type": "error", "message": message})
+        self._pause_event.clear()
+        await self._wait_if_paused()
 
 
 # ------------------------------------------------------------------
@@ -627,6 +870,8 @@ def _act_to_dict(act) -> dict:
         "output_tokens": act.output_tokens,
         "model_used":   act.model_used,
         "timestamp":    act.timestamp,
+        "cost_usd":     act.cost_usd,
+        "citations":    getattr(act, "citations", None),
     }
 
 
@@ -651,7 +896,10 @@ def _friendly_error(e: Exception) -> str:
 
 
 def _friendly_quota_error(provider: str) -> str:
-    names = {"anthropic": "Anthropic", "openai": "OpenAI", "google": "Google"}
+    names = {
+        "anthropic": "Anthropic", "openai": "OpenAI", "google": "Google",
+        "perplexity": "Perplexity", "moonshot": "Moonshot", "xai": "xAI",
+    }
     name = names.get(provider, provider)
     return (
         f"Your {name} account has run out of credits. "

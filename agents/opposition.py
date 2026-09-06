@@ -55,7 +55,7 @@ Separate each paragraph with a blank line. Example structure:
 
 [causality] Your first objection here, citing supporting evidence...
 
-[sourcing] Your second objection here, explaining the evidentiary gap...
+[sourcing] Your second objection here, explaining the missing evidence...
 
 [premise] Your third objection here (optional), attacking an underlying assumption...
 
@@ -84,23 +84,28 @@ OUTPUT FORMAT — return ONLY this JSON object, no preamble, no markdown fences:
 {
   "act_type": "CHALLENGE" | "CONCEDE",
   "claim_id": "string — claim_id UUID of the claim being targeted",
-  "target_act_id": "string — the FULL act_id UUID of the specific act you are targeting, copied exactly from the act history (e.g. '386bffc2-e5de-4bd8-b85d-a10298adc5cf'). NEVER use a turn number here.",
+  "target_act_id": "string — the FULL act_id UUID of the specific act you are targeting, copied verbatim from the act history (e.g. '386bffc2-e5de-4bd8-b85d-a10298adc5cf'). NEVER use a turn number here.",
   "content": "string — your challenge or concession. For challenges: one paragraph per angle, each prefixed [type], separated by blank lines. Under 250 words.",
   "challenge_type": "sourcing" | "premise" | "causality" | "significance" | "definition" | "comparison" | "completeness" | "consistency" | "multi",
-  "reason": "string | null — for CONCEDE: which specific objections were resolved and how"
+  "reason": "string | null — for CONCEDE: which specific objections were resolved and how",
+  "citations": [
+    {"url": "string — copied verbatim from the EVIDENCE POOL",
+     "quote": "string — a verbatim passage of at most 50 words copied word for word from that source's pooled text, containing every figure your sentence attributes to it"}
+  ]
 }
+Include one citations entry per source you cite; use [] when the act cites nothing.
 
 For a multi-angle challenge, set challenge_type to "multi".
 For a single-focus follow-up after a DEFEND, set challenge_type to the specific type.
 
 CITATION STANDARDS (mandatory, no exceptions)
-Every CHALLENGE act MUST include at least one markdown hyperlink to a real source:
+Every CHALLENGE act MUST include at least one markdown hyperlink to a pooled source:
 [Source Name](https://exact-url). Vague references to "studies", "data", or "research"
 without a link are not permitted.
 
 If you reference a named study, report, or author, it MUST have a hyperlink.
 Every URL must be copied verbatim from the EVIDENCE POOL supplied with this turn.
-You cannot search the web from here, so the pool is the only place a real URL can come
+You cannot search the web from here, so the pool is the only place a working URL can come
 from. A URL written from memory will be stripped automatically and your act marked
 unsourced. If the pool holds nothing supporting your point, use general evidence class
 language ("systematic reviews show…") and say the pool lacks a specific source.
@@ -113,7 +118,18 @@ that turn. Flag it explicitly:
 "The cited URL [url] is not in the evidence pool / does not support the stated claim."
 Do not let an unsupported source pass unchallenged. Note that a marker reading
 "[unverified source removed]" means a fabricated URL was already stripped — treat that
-as a sourcing failure worth challenging.
+as a sourcing failure that merits challenging.
+
+REFERENT CHECK (part of the sourcing duty)
+The act history shows each citation's verbatim quote next to the sentence that cites it,
+with a mechanical check status. Compare them: does the citing sentence claim what the
+quote says, about the same thing? A figure moved onto a different referent — for example
+a percentage about economic effects presented as a percentage about ridership — is a
+sourcing failure even when the number itself is correct. Raise a [sourcing] CHALLENGE
+naming the quote and the misstated referent. A citation marked "mismatch" (quote not
+found in the source), "title_only" (the quote is just the source's headline, which
+substantiates nothing), or carrying ungrounded numbers has already failed
+mechanically: challenge it explicitly.
 
 CONCEDE STANDARD — read carefully
 CONCEDE is a statement that the proposition has adequately resolved your challenge.
@@ -144,8 +160,7 @@ class OppositionAgent(BaseAgent):
     def __init__(self, nickname: str = "Antithesis", model: str = "gpt-4o",
                  temperature: float = 0.4, aggression: float = 0.8,
                  min_challenges: int = 2, min_concessions: int = 1,
-                 config: dict = None, provider: str = "",
-                 endpoint_type: str = "default"):
+                 config: dict = None, provider: str = ""):
         super().__init__(
             role="opposition",
             nickname=nickname,
@@ -153,7 +168,6 @@ class OppositionAgent(BaseAgent):
             temperature=temperature,
             config=config or {},
             provider=provider,
-            endpoint_type=endpoint_type,
         )
         self._aggression      = aggression
         self._min_challenges  = min_challenges
@@ -166,7 +180,7 @@ class OppositionAgent(BaseAgent):
             "turn": state.turn,
             "current_phase": state.phase,
             "legal_acts_this_turn": legal,
-            "outstanding_challenges": list(state.outstanding_challenges),
+            "outstanding_challenges": self._bounded_challenges(state),
             "claims": {
                 cid: {
                     "author": c.author,
@@ -195,11 +209,22 @@ class OppositionAgent(BaseAgent):
         types_used_count = len(set(types_used))
         can_concede = (challenges_so_far >= self._min_challenges and types_used_count >= 3)
 
+        # The audit covers only the most recent _CHALLENGE_WINDOW outstanding
+        # challenges in full; anything older collapses to one aggregate line.
+        # Per-line defence lists are capped the same way. Without both bounds
+        # this section grows linearly with unresolved challenges, which was
+        # the measured driver of per-turn token growth in long runs.
+        active_ids = list(state.outstanding_challenges)[-self._CHALLENGE_WINDOW:]
+        older_ids = list(state.outstanding_challenges)[:-self._CHALLENGE_WINDOW] \
+            if len(state.outstanding_challenges) > self._CHALLENGE_WINDOW else []
+
         audit_lines: list[str] = []
-        for ch_id in state.outstanding_challenges:
+        active_acts: list = []
+        for ch_id in active_ids:
             ch_act = next((a for a in state.acts if a.act_id == ch_id), None)
             if not ch_act:
                 continue
+            active_acts.append(ch_act)
             defences = [
                 a for a in state.acts
                 if a.turn > ch_act.turn
@@ -208,18 +233,26 @@ class OppositionAgent(BaseAgent):
                 and _link_re.search(a.content)
             ]
             if defences:
-                turns_str = ", ".join(str(a.turn) for a in defences)
+                defence_turns = [a.turn for a in defences]
+                if len(defence_turns) > 2:
+                    turns_str = (
+                        f"{len(defence_turns)} defences, most recently at turns "
+                        f"[{defence_turns[-2]}, {defence_turns[-1]}]"
+                    )
+                else:
+                    turns_str = "turns [" + ", ".join(str(t) for t in defence_turns) + "]"
                 if can_concede:
                     audit_lines.append(
                         f"  act_id:{ch_id} (turn {ch_act.turn}): "
-                        f"ADDRESSED WITH EVIDENCE at turns [{turns_str}] "
+                        f"ADDRESSED WITH EVIDENCE at {turns_str} "
                         f"— you MUST emit CONCEDE targeting this act_id"
                     )
                 else:
                     still_needed = self._min_challenges - challenges_so_far
                     audit_lines.append(
                         f"  act_id:{ch_id} (turn {ch_act.turn}): "
-                        f"ADDRESSED — but CONCEDE BLOCKED: only {challenges_so_far}/{self._min_challenges} "
+                        f"ADDRESSED at {turns_str} — but CONCEDE BLOCKED: only "
+                        f"{challenges_so_far}/{self._min_challenges} "
                         f"challenges issued and {types_used_count}/3 types used. "
                         f"Issue {still_needed} more challenge(s) from unused types before conceding. "
                         f"Raise a new challenge angle on this claim now."
@@ -229,14 +262,32 @@ class OppositionAgent(BaseAgent):
                     f"  act_id:{ch_id} (turn {ch_act.turn}): "
                     f"NOT YET ADDRESSED — further challenge is valid"
                 )
+        if older_ids:
+            older_types: dict[str, int] = {}
+            for ch_id in older_ids:
+                a = next((x for x in state.acts if x.act_id == ch_id), None)
+                t = (a.challenge_type if a and a.challenge_type else "unknown")
+                older_types[t] = older_types.get(t, 0) + 1
+            types_str = ", ".join(f"{k}×{v}" for k, v in sorted(older_types.items()))
+            audit_lines.append(
+                f"  (+{len(older_ids)} older outstanding challenge(s) omitted from "
+                f"this audit: {types_str}. They remain open and concedable; their "
+                f"act_ids are in the act history when needed.)"
+            )
+        lapsed_count = len(getattr(state, "lapsed_challenges", []) or [])
+        if lapsed_count:
+            audit_lines.append(
+                f"  ({lapsed_count} earlier challenge(s) lapsed: defended, then no "
+                f"follow-up from you for 10 debater turns. They are closed.)"
+            )
         audit_section = "\n".join(audit_lines) if audit_lines else "  (no outstanding challenges — raise a new CHALLENGE)"
 
-        # --- URL FRESHNESS: collect all URLs cited in prior CHALLENGE acts ---
+        # --- URL FRESHNESS: URLs cited in the audited (active) challenges only.
+        # Bounded with the audit; a URL from a long-lapsed challenge may recur.
         used_urls: set[str] = set()
-        for a in state.acts:
-            if a.act_type == "CHALLENGE" and a.agent_role == "opposition":
-                for m in re.finditer(r'\(https?://[^)]+\)', a.content):
-                    used_urls.add(m.group()[1:-1])  # strip surrounding parens
+        for a in active_acts:
+            for m in re.finditer(r'\(https?://[^)]+\)', a.content):
+                used_urls.add(m.group()[1:-1])  # strip surrounding parens
         urls_str = ("\n  ".join(sorted(used_urls))) if used_urls else "(none yet)"
 
         system = _SYSTEM + f"""
@@ -248,7 +299,7 @@ SESSION PARAMETERS
   Challenge types used so far: {types_used if types_used else ['none yet']}
   You MUST reach {self._min_challenges} challenges and use ≥3 distinct challenge_types before CONCEDE is justified.
   Suggested angle(s) for THIS turn (randomly drawn from unused types): {suggested}
-  Lead with these types. Do not default to sourcing unless it is genuinely the sharpest objection.
+  Lead with these types. Do not default to sourcing unless it is truly the strongest objection.
 
 CONCEDE AUDIT
   Concession eligibility: {"OPEN — thresholds met, concede addressed challenges" if can_concede else f"BLOCKED — {challenges_so_far}/{self._min_challenges} challenges issued, {types_used_count}/3 types used. Must issue more challenges before any concession is valid."}
@@ -265,12 +316,12 @@ SOURCE FRESHNESS — do NOT reuse these URLs already cited in prior CHALLENGE ac
 <dialogue_state>
 {state_json}
 </dialogue_state>
-<act_history>
+{self._format_chapters(state)}<act_history>
 {self._format_act_history(state)}
 </act_history>
 </debate_data>
 
 Your role is opposition. Legal acts this turn: {legal}.
-Emit exactly one JSON object matching the OUTPUT FORMAT. No other text.\
+Emit a single JSON object matching the OUTPUT FORMAT. No other text.\
 """
         return system, user

@@ -33,10 +33,6 @@ class AgentsConfig(BaseModel):
     synthesiser: SynthesiserAgentConfig = SynthesiserAgentConfig()
 
 
-class OpenAIConfig(BaseModel):
-    responses_mode: str = "auto"
-
-
 class ProtocolConfig(BaseModel):
     min_challenges: int = 2
     min_concessions: int = 1
@@ -61,5 +57,4 @@ class AgoraConfig(BaseModel):
     protocol: ProtocolConfig = ProtocolConfig()
     agents: AgentsConfig = AgentsConfig()
     output: OutputConfig = OutputConfig()
-    openai: OpenAIConfig = OpenAIConfig()
     providers: ProvidersConfig = ProvidersConfig()

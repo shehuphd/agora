@@ -40,7 +40,12 @@ CREATE TABLE IF NOT EXISTS acts (
     input_tokens   INTEGER,
     output_tokens  INTEGER,
     model_used     TEXT,
-    timestamp      TEXT
+    timestamp      TEXT,
+    cost_usd       REAL,
+    challenge_type TEXT,
+    retries        INTEGER,
+    citations      TEXT,
+    citation_repairs INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS claims (
@@ -70,6 +75,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col_sql in (
         "ALTER TABLE runs ADD COLUMN config TEXT",
         "ALTER TABLE runs ADD COLUMN continued_from TEXT",
+        "ALTER TABLE acts ADD COLUMN cost_usd REAL",
+        "ALTER TABLE acts ADD COLUMN challenge_type TEXT",
+        "ALTER TABLE acts ADD COLUMN retries INTEGER",
+        "ALTER TABLE acts ADD COLUMN citation_repairs INTEGER",
+        "ALTER TABLE acts ADD COLUMN citations TEXT",
     ):
         try:
             conn.execute(col_sql)
@@ -85,13 +95,17 @@ def write_act_to_db(conn: sqlite3.Connection, act: Act) -> None:
         """INSERT OR REPLACE INTO acts
            (act_id, run_id, turn, agent, agent_role, act_type,
             claim_id, target_act_id, content, reason,
-            input_tokens, output_tokens, model_used, timestamp)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            input_tokens, output_tokens, model_used, timestamp, cost_usd,
+            challenge_type, retries, citation_repairs, citations)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             act.act_id, act.run_id, act.turn, act.agent, act.agent_role,
             act.act_type, act.claim_id, act.target_act_id, act.content,
             act.reason, act.input_tokens, act.output_tokens,
-            act.model_used, act.timestamp,
+            act.model_used, act.timestamp, act.cost_usd,
+            act.challenge_type, act.retries,
+            getattr(act, "citation_repairs", None),
+            json.dumps(act.citations) if act.citations is not None else None,
         ),
     )
     conn.commit()
@@ -162,6 +176,9 @@ def write_state_json(state: DialogueState, run_dir: Path) -> None:
             role: {"input": u.input_tokens, "output": u.output_tokens}
             for role, u in state.token_usage.items()
         },
+        "chapters": list(getattr(state, "chapters", []) or []),
+        "lapsed_challenges": list(getattr(state, "lapsed_challenges", []) or []),
+        "aux_cost_usd": getattr(state, "aux_cost_usd", 0.0),
     }
     path = run_dir / "state.json"
     path.write_text(json.dumps(data, indent=2))
@@ -234,7 +251,7 @@ def load_state(conn: sqlite3.Connection, run_id: str) -> DialogueState:
         raise ValueError(f"Run {run_id} not found in database")
 
     act_rows = conn.execute(
-        "SELECT act_id, run_id, turn, agent, agent_role, act_type, claim_id, target_act_id, content, reason, input_tokens, output_tokens, model_used, timestamp FROM acts WHERE run_id=? ORDER BY turn, timestamp",
+        "SELECT act_id, run_id, turn, agent, agent_role, act_type, claim_id, target_act_id, content, reason, input_tokens, output_tokens, model_used, timestamp, cost_usd FROM acts WHERE run_id=? ORDER BY turn, timestamp",
         (run_id,),
     ).fetchall()
 
@@ -249,7 +266,7 @@ def load_state(conn: sqlite3.Connection, run_id: str) -> DialogueState:
             agent_role=r[4], act_type=r[5], claim_id=r[6],
             target_act_id=r[7], content=r[8], reason=r[9],
             input_tokens=r[10], output_tokens=r[11],
-            model_used=r[12], timestamp=r[13],
+            model_used=r[12], timestamp=r[13], cost_usd=r[14],
         )
         for r in act_rows
     ]

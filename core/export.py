@@ -95,7 +95,7 @@ def format_argument_map_content(content: str) -> str:
         lines += ["**Arbiter summary**", "", str(c["arbiter_summary"]), ""]
 
     if not lines:
-        # A map with no claims and no summary says something real: nothing survived.
+        # A map with no claims and no summary carries meaning of its own: nothing survived.
         return "*(empty argument map — no claims recorded)*"
     return "\n".join(lines).rstrip()
 
@@ -279,6 +279,22 @@ def build_markdown(data: dict) -> str:
         f"| **Total** | **{_n(total_in)}** | **{_n(total_out)}** | **{_n(total_in + total_out)}** |",
         "",
     ]
+
+    # Dollar total from the recorded per-act costs (never recomputed). None
+    # priced → no cost line at all; some unpriced → the total is a stated
+    # minimum. Exports from before cost tracking simply omit the line.
+    cost_total = None
+    cost_partial = False
+    for act in data.get("acts", []):
+        c = act.get("cost_usd") if isinstance(act, dict) else None
+        if c is not None:
+            cost_total = (cost_total or 0.0) + c
+        elif (act.get("input_tokens") or 0) + (act.get("output_tokens") or 0) > 0:
+            cost_partial = True
+    if cost_total is not None:
+        figure = f"${cost_total:.4f}" if cost_total < 0.01 else f"${cost_total:.2f}"
+        note = " (minimum — some calls could not be priced)" if cost_partial else ""
+        lines += [f"**Total cost:** {figure}{note}", ""]
 
     override_log = data.get("override_log") or []
     if override_log:

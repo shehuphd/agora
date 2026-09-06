@@ -1,0 +1,72 @@
+# Shiplock release gate. Runs locally (shiplock check), in the suite
+# (tests/test_docs.py), and in CI once a workflow exists.
+# Agora ships no PyPI package: no [version] (no __version__ anywhere) and no
+# readme key (relative doc links are fine on GitHub, and readme-links exists
+# for PyPI's link resolution).
+
+[docs]
+public = ["README.md", "USAGE.md", "ARCHITECTURE.md", "CHANGELOG.md", "MANIFEST.md"]
+changelog = "CHANGELOG.md"
+
+[style]
+source_globs = [
+  "agents/**/*.py",
+  "api/**/*.py",
+  "core/**/*.py",
+  "providers/**/*.py",
+  "runners/**/*.py",
+  "config/*.py",
+  "static/*.js",
+  "static/*.html",
+  "tests/**/*.py",
+]
+# Language syntax, not prose: SQL's REAL column type (runs_db, checkpoint,
+# judge's run_judgements DDL, debates' migration list, and the DDL fixture in
+# test_cost_surfaces) and CSS's gap property in inline styles (traces.js,
+# index.html). The sweep has no per-line carve-out, so these files sit outside
+# it; their prose was hand-swept clean on 2026-09-06.
+exclude = [
+  "core/runs_db.py",
+  "core/checkpoint.py",
+  "core/judge.py",
+  "api/routers/debates.py",
+  "static/traces.js",
+  "static/index.html",
+  "tests/test_cost_surfaces.py",
+]
+
+[architecture]
+doc = "ARCHITECTURE.md"
+source_dir = "core"
+exempt = ["__init__"]
+
+[manifest]
+doc = "MANIFEST.md"
+sources = [
+  "agents/*.py",
+  "api/**/*.py",
+  "core/*.py",
+  "providers/*.py",
+  "runners/*.py",
+  "config/*.py",
+  "static/*.js",
+  "static/*.html",
+  "static/*.css",
+  "tests/*.py",
+]
+exempt = ["__init__.py"]
+
+# Agora declares dependencies in requirements.txt only (no pyproject), so
+# deps-declared-once holds the door against a future duplicate declaration.
+[deps]
+requirements = ["requirements*.txt"]
+
+[tests]
+globs = ["tests/**/*.py"]
+
+# The USAGE speech-act table must name every ActType member the protocol
+# defines, so a new act can't ship undocumented.
+[[coverage]]
+object = "core.state:ActType"
+doc = "USAGE.md"
+kind = "enum"

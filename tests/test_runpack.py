@@ -279,6 +279,70 @@ class TestTokenUsage:
 
 
 # ------------------------------------------------------------------
+# Cost — read back from each act's own cost_usd, never recomputed
+# (see core/runpack.py's module docstring and the turns_out comment)
+# ------------------------------------------------------------------
+
+class TestCostUsage:
+    def _data(self, acts):
+        return {
+            "run_id": RUN_ID, "debate_title": "Cost Test", "topic": "x",
+            "status": "closed", "created_at": "2026-01-01T00:00:00",
+            "closure_reason": "max_turns", "config": {}, "acts": acts, "claims": [],
+        }
+
+    def test_turn_carries_its_own_recorded_cost(self, run_dir, traces_dir):
+        data = self._data([_act(0, "proposition", cost_usd=0.0123)])
+        pack = build_run_pack(data, run_dir, traces_dir)
+        assert pack["turns"][0]["cost_usd"] == 0.0123
+
+    def test_unpriced_turn_reports_none_not_zero(self, run_dir, traces_dir):
+        data = self._data([_act(0, "proposition", cost_usd=None)])
+        pack = build_run_pack(data, run_dir, traces_dir)
+        assert pack["turns"][0]["cost_usd"] is None
+
+    def test_role_sums_only_its_own_priced_acts(self, run_dir, traces_dir):
+        data = self._data([
+            _act(0, "proposition", cost_usd=0.10),
+            _act(1, "proposition", cost_usd=0.05),
+            _act(2, "moderator", cost_usd=0.01),
+        ])
+        usage = build_run_pack(data, run_dir, traces_dir)["token_usage"]
+        assert usage["by_role"]["proposition"]["cost_usd"] == pytest.approx(0.15)
+        assert usage["by_role"]["proposition"]["cost_partial"] is False
+        assert usage["cost_usd"] == pytest.approx(0.16)
+        assert usage["cost_partial"] is False
+
+    def test_role_with_no_priced_acts_reports_none_not_zero(self, run_dir, traces_dir):
+        """A role whose model rates can't price must show as unknown, not
+        as having cost nothing — the un-nulled sum would otherwise silently
+        read as a priced $0.00."""
+        data = self._data([_act(0, "moderator", cost_usd=None)])
+        usage = build_run_pack(data, run_dir, traces_dir)["token_usage"]
+        assert usage["by_role"]["moderator"]["cost_usd"] is None
+        assert usage["by_role"]["moderator"]["cost_partial"] is True
+        assert usage["cost_usd"] is None
+        assert usage["cost_partial"] is True
+
+    def test_mixed_priced_and_unpriced_role_sums_known_and_flags_partial(self, run_dir, traces_dir):
+        data = self._data([
+            _act(0, "proposition", cost_usd=0.10),
+            _act(1, "proposition", cost_usd=None),
+        ])
+        usage = build_run_pack(data, run_dir, traces_dir)["token_usage"]
+        assert usage["by_role"]["proposition"]["cost_usd"] == pytest.approx(0.10)
+        assert usage["by_role"]["proposition"]["cost_partial"] is True
+        assert usage["cost_usd"] == pytest.approx(0.10)
+        assert usage["cost_partial"] is True
+
+    def test_no_acts_priced_at_all_top_level_cost_is_none(self, run_dir, traces_dir):
+        data = self._data([_act(0, "proposition", cost_usd=None), _act(1, "moderator", cost_usd=None)])
+        usage = build_run_pack(data, run_dir, traces_dir)["token_usage"]
+        assert usage["cost_usd"] is None
+        assert usage["cost_partial"] is True
+
+
+# ------------------------------------------------------------------
 # Degradation — a pack must survive missing or broken inputs
 # ------------------------------------------------------------------
 

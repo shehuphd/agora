@@ -38,8 +38,13 @@ OUTPUT FORMAT — return ONLY this JSON object, no preamble, no markdown fences:
   "claim_id": "string — claim_id UUID this act relates to; null for ACCEPT/REJECT_STEELMAN if unknown",
   "target_act_id": "string | null — the FULL act_id UUID of the act you are responding to (copied from act history); null for ASSERT",
   "content": "string — your claim or response text, under 150 words",
-  "reason": "string — one sentence justifying this act"
+  "reason": "string — one sentence justifying this act",
+  "citations": [
+    {"url": "string — copied verbatim from the EVIDENCE POOL",
+     "quote": "string — a verbatim passage of at most 50 words copied word for word from that source's pooled text, containing every figure your sentence attributes to it"}
+  ]
 }
+Include one citations entry per source you cite; use [] when the act cites nothing.
 
 CLAIM STANDARDS
 - Claims must be falsifiable. Avoid tautologies and unfalsifiable generalisations.
@@ -49,7 +54,7 @@ CLAIM STANDARDS
   Copy the URL character for character. Vague references to "research", "studies",
   or "experts" without a link are not permitted.
   If you reference a named study, report, or author, it MUST have a hyperlink.
-  You cannot search the web from here, so the pool is the only place a real URL can
+  You cannot search the web from here, so the pool is the only place a working URL can
   come from. A URL you write from memory will be stripped automatically.
   If the pool holds nothing supporting your point, say so and argue from reasoning —
   an honest unsourced argument is acceptable; an invented citation is not.
@@ -73,8 +78,7 @@ class PropositionAgent(BaseAgent):
     RETRIEVES = True   # gathers evidence into the shared pool
 
     def __init__(self, nickname: str = "Thesis", model: str = "claude-sonnet-4-6",
-                 temperature: float = 0.7, config: dict = None, provider: str = "",
-                 endpoint_type: str = "default"):
+                 temperature: float = 0.7, config: dict = None, provider: str = ""):
         super().__init__(
             role="proposition",
             nickname=nickname,
@@ -82,7 +86,6 @@ class PropositionAgent(BaseAgent):
             temperature=temperature,
             config=config or {},
             provider=provider,
-            endpoint_type=endpoint_type,
         )
 
     def _build_prompt(self, state: DialogueState) -> tuple[str, str]:
@@ -92,7 +95,7 @@ class PropositionAgent(BaseAgent):
             "turn": state.turn,
             "current_phase": state.phase,
             "legal_acts_this_turn": legal,
-            "outstanding_challenges": list(state.outstanding_challenges),
+            "outstanding_challenges": self._bounded_challenges(state),
             "claims": {
                 cid: {
                     "author": c.author,
@@ -108,12 +111,12 @@ class PropositionAgent(BaseAgent):
 <dialogue_state>
 {state_json}
 </dialogue_state>
-<act_history>
+{self._format_chapters(state)}<act_history>
 {self._format_act_history(state)}
 </act_history>
 </debate_data>
 
 Your role is proposition. Legal acts this turn: {legal}.
-Emit exactly one JSON object matching the OUTPUT FORMAT. No other text.\
+Emit a single JSON object matching the OUTPUT FORMAT. No other text.\
 """
         return _SYSTEM, user

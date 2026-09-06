@@ -11,12 +11,13 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.responses import Response
 from traceact import ActionTrace
 
-from api.models import DebateConfig
+from api.models import DebateConfig, CostEstimateRequest
 from api.routers.settings import _load_config as _load_agora_config
 from core.config import DebateRunConfig
 from core.export import build_markdown as _build_markdown, _n
 from core.runpack import build_run_pack as _build_run_pack, build_pack_markdown as _build_pack_markdown
 from core import runs_db as _runs_db
+from core import cost as _cost
 
 router = APIRouter()
 
@@ -35,6 +36,86 @@ def get_queue(run_id: str) -> asyncio.Queue:
     if run_id not in _run_queues:
         raise HTTPException(status_code=404, detail="Run not found or debate not running")
     return _run_queues[run_id]
+
+
+@router.post("/debates/estimate-cost")
+async def estimate_cost(req: CostEstimateRequest):
+    """Rough pre-debate dollar estimate for the Confirm screen.
+
+    token_budget is one pool shared across all four roles (see
+    protocol.token_budget), not a per-role figure, and Agora doesn't track a
+    historical per-role split to weight against. Rather than invent an
+    unverified weighting on top of an already-approximate estimate, this
+    splits the budget evenly across whichever roles have a model chosen, and
+    assumes a 70/30 input/output split within each role's share. Both
+    assumptions are returned so the UI states them, never presents the
+    number as exact.
+    """
+    INPUT_RATIO = 0.7
+    roles = [
+        ("proposition", req.prop_model, req.prop_provider),
+        ("opposition",  req.opp_model,  req.opp_provider),
+        ("moderator",   req.mod_model,  req.mod_provider),
+        ("synthesiser", req.synth_model, req.synth_provider),
+    ]
+    # A model named without a provider (CSV batch rows carry no provider
+    # column) is resolved against the registry the same way debate creation
+    # resolves it. Unknown or ambiguous stays provider-less and prices as
+    # unpriced rather than guessing between vendors.
+    if any(m and not p for _, m, p in roles):
+        conn = _runs_db.connect()
+        try:
+            resolved = []
+            for role, model, provider in roles:
+                if model and not provider:
+                    try:
+                        provider = _runs_db.resolve_model(conn, model)["provider"]
+                    except Exception:
+                        provider = None
+                resolved.append((role, model, provider))
+            roles = resolved
+        finally:
+            conn.close()
+    populated = [r for r in roles if r[1] and r[2]]
+    per_role_tokens = req.token_budget // len(populated) if populated else 0
+    input_tok = round(per_role_tokens * INPUT_RATIO)
+    output_tok = per_role_tokens - input_tok
+
+    by_role: dict[str, dict] = {}
+    unpriced_roles: list[str] = []
+    total_usd = 0.0
+    priced_any = False
+    for role, model, provider in roles:
+        if not model or not provider:
+            by_role[role] = {
+                "provider": provider, "model": model,
+                "tokens_assumed": 0, "cost_usd": None,
+            }
+            continue
+        call_cost = _cost.cost_usd(provider, model, input_tok, output_tok)
+        by_role[role] = {
+            "provider": provider, "model": model,
+            "tokens_assumed": per_role_tokens, "cost_usd": call_cost,
+        }
+        if call_cost is None:
+            unpriced_roles.append(role)
+        else:
+            total_usd += call_cost
+            priced_any = True
+
+    return {
+        "assumptions": {
+            "token_budget": req.token_budget,
+            "input_ratio": INPUT_RATIO,
+            "output_ratio": round(1 - INPUT_RATIO, 2),
+            "roles_split_evenly": True,
+            "roles_counted": len(populated),
+            "prices_as_of": _cost.snapshot_date(),
+        },
+        "by_role": by_role,
+        "total_usd": total_usd if priced_any else None,
+        "unpriced_roles": unpriced_roles,
+    }
 
 
 @router.post("/debates")
@@ -63,13 +144,19 @@ async def create_debate(config: DebateConfig, background_tasks: BackgroundTasks)
     # Resolve every role's selection to a concrete (provider, model, endpoint)
     # here, once, and carry it in the run config. Agents are then handed a
     # routable address instead of re-deriving one per construction, so the run
-    # records exactly which vendor served it and a later registry change cannot
+    # records the precise vendor that served it, and a later registry change cannot
     # retroactively point it somewhere else.
     run_cfg = _resolve_run_models(run_cfg)
 
     run_dir = RUNS_DIR / _make_run_dir_name(run_cfg.topic)
 
-    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    # Unbounded, matching the batch path: no SSE client is guaranteed to be
+    # attached (a run created over the API and never opened in a browser has
+    # no consumer), and the runner awaits every put — a bounded queue with no
+    # reader wedged two live 100-turn runs at exactly ~200 events, frozen
+    # mid-turn with status "running" and no error. Events are small dicts and
+    # _cleanup_run drops the queue when the run ends.
+    queue: asyncio.Queue = asyncio.Queue()
     pause_event       = asyncio.Event()
     pause_event.set()  # not paused at start
     force_close_event = asyncio.Event()  # not set = still running
@@ -248,6 +335,17 @@ async def list_debates(
     return await asyncio.to_thread(_query)
 
 
+def _act_row_to_dict(cols: list, row: tuple) -> dict:
+    """Zip an acts row into a dict, decoding the citations JSON column."""
+    d = dict(zip(cols, row))
+    if d.get("citations"):
+        try:
+            d["citations"] = _json.loads(d["citations"])
+        except Exception:
+            d["citations"] = None
+    return d
+
+
 @router.get("/debates/{run_id}")
 async def get_debate(run_id: str):
     db_path = _find_db(run_id)
@@ -258,6 +356,7 @@ async def get_debate(run_id: str):
     for col_sql in (
         "ALTER TABLE runs ADD COLUMN config TEXT",
         "ALTER TABLE runs ADD COLUMN continued_from TEXT",
+        "ALTER TABLE acts ADD COLUMN cost_usd REAL",
     ):
         try:
             conn.execute(col_sql)
@@ -273,12 +372,17 @@ async def get_debate(run_id: str):
     if not run:
         raise HTTPException(status_code=404, detail="Run record not found")
 
-    acts = conn.execute(
+    # Column names come from the cursor, not a hand-written list: a run
+    # recorded before a column existed, or after one was added, would
+    # otherwise zip values against the wrong names.
+    acts_cur = conn.execute(
         "SELECT * FROM acts WHERE run_id=? ORDER BY turn, timestamp", (run_id,)
-    ).fetchall()
-    claims = conn.execute(
-        "SELECT * FROM claims WHERE run_id=?", (run_id,)
-    ).fetchall()
+    )
+    act_cols = [c[0] for c in acts_cur.description]
+    acts = acts_cur.fetchall()
+    claims_cur = conn.execute("SELECT * FROM claims WHERE run_id=?", (run_id,))
+    claim_cols = [c[0] for c in claims_cur.description]
+    claims = claims_cur.fetchall()
     meta_row = conn.execute(
         "SELECT value FROM meta WHERE key='token_offset'"
     ).fetchone()
@@ -290,13 +394,6 @@ async def get_debate(run_id: str):
             token_offset = _json.loads(meta_row[0])
         except Exception:
             pass
-
-    act_cols = [
-        "act_id", "run_id", "turn", "agent", "agent_role", "act_type",
-        "claim_id", "target_act_id", "content", "reason",
-        "input_tokens", "output_tokens", "model_used", "timestamp",
-    ]
-    claim_cols = ["claim_id", "run_id", "author", "content", "status", "last_updated"]
 
     raw_cfg = run[6]
     parsed_cfg = _json.loads(raw_cfg) if raw_cfg else {}
@@ -337,10 +434,103 @@ async def get_debate(run_id: str):
         "is_continuable":  is_continuable,
         "experiment_id":   experiment_id,
         "experiment_name": experiment_name,
-        "acts":    [dict(zip(act_cols, row)) for row in acts],
+        "acts":    [_act_row_to_dict(act_cols, row) for row in acts],
         "claims":  [dict(zip(claim_cols, row)) for row in claims],
         "override_log": _override_logs.get(run_id, []),
     }
+
+
+# Runs currently being judged — judging bills per run, so double-starts are
+# refused rather than queued.
+_judging: set[str] = set()
+
+
+def _judge_run_context(run_id: str) -> Path:
+    """The run's directory, for a closed run only. Raises HTTPException
+    otherwise — judging reads the finished record."""
+    db_path = _find_db(run_id)
+    if not db_path:
+        raise HTTPException(status_code=404, detail="Debate not found")
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT status FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    conn.close()
+    if row and row[0] == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="This debate is still running — judging reads the finished record. Wait for it to close, then judge.",
+        )
+    return db_path.parent
+
+
+@router.get("/debates/{run_id}/judge/estimate")
+async def judge_estimate(run_id: str):
+    """Price a judgement of this run at the configured defaults, before
+    spending anything."""
+    from core import judge as _judge
+    run_dir = _judge_run_context(run_id)
+    idx = _runs_db.connect()
+    try:
+        config = _judge.default_config(idx)
+    except _runs_db.ModelNotRoutable as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        idx.close()
+    return _judge.estimate_run(run_dir, config)
+
+
+@router.get("/debates/{run_id}/judgements")
+async def get_judgements(run_id: str):
+    """Stored judgements for this run, newest last, plus whether one is
+    currently in flight."""
+    from core import judge as _judge
+    _judge_run_context(run_id)
+    idx = _runs_db.connect()
+    try:
+        rows = _judge.list_judgements(idx, run_id)
+    finally:
+        idx.close()
+    return {"judgements": rows, "in_progress": run_id in _judging}
+
+
+@router.post("/debates/{run_id}/judge")
+async def judge_debate(run_id: str, background_tasks: BackgroundTasks):
+    """Judge this closed run at the configured defaults, in the background.
+
+    Returns the priced estimate immediately; poll GET /judgements for the
+    result. Refuses a second start while one is in flight.
+    """
+    from core import judge as _judge
+    run_dir = _judge_run_context(run_id)
+    if run_id in _judging:
+        raise HTTPException(status_code=409, detail="A judgement of this run is already in progress.")
+    idx = _runs_db.connect()
+    try:
+        config = _judge.default_config(idx)
+    except _runs_db.ModelNotRoutable as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        idx.close()
+    estimate = _judge.estimate_run(run_dir, config)
+
+    async def _run_judgement() -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            payload = await loop.run_in_executor(
+                None, _judge.judge_run, run_dir, run_id, config,
+            )
+            conn = _runs_db.connect()
+            try:
+                _judge.store_judgement(conn, payload)
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(f"[judge] judgement of {run_id} failed: {exc}", flush=True)
+        finally:
+            _judging.discard(run_id)
+
+    _judging.add(run_id)
+    background_tasks.add_task(_run_judgement)
+    return {"started": True, "estimate": estimate}
 
 
 @router.get("/debates/{run_id}/export")
@@ -492,7 +682,8 @@ async def continue_debate(run_id: str, background_tasks: BackgroundTasks):
     new_run_id  = str(uuid.uuid4())
     new_run_dir = RUNS_DIR / _make_run_dir_name(original_cfg.topic)
 
-    queue           = asyncio.Queue(maxsize=200)
+    # Unbounded for the same reason as create_debate's queue above.
+    queue           = asyncio.Queue()
     pause_event     = asyncio.Event()
     pause_event.set()
     force_close     = asyncio.Event()
@@ -620,10 +811,7 @@ def _resolve_run_models(run_cfg: "DebateRunConfig") -> "DebateRunConfig":
             except _runs_db.ModelNotRoutable as exc:
                 problems.append(f"{role} — {exc}")
                 continue
-            resolved[role] = dataclasses.replace(
-                agent, provider=entry["provider"],
-                endpoint_type=entry["endpoint_type"],
-            )
+            resolved[role] = dataclasses.replace(agent, provider=entry["provider"])
     finally:
         conn.close()
 

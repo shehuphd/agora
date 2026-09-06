@@ -87,6 +87,7 @@
           <th>participants</th>
           <th class="sortable" data-sort="turns">turns <span class="sort-icon"></span></th>
           <th class="sortable" data-sort="tokens">tokens <span class="sort-icon"></span></th>
+          <th class="sortable" data-sort="cost">cost <span class="sort-icon"></span></th>
           <th>mode</th>
           <th class="sortable" data-sort="status">status <span class="sort-icon"></span></th>
           <th></th>
@@ -94,6 +95,7 @@
       </thead>
       <tbody id="history-tbody"></tbody>
     </table>
+    <div id="history-spend" class="history-spend" style="display:none"></div>
     <div id="history-pagination" class="pagination-bar" style="display:none">
       <span id="pagination-info" class="pagination-info"></span>
       <div class="pagination-controls">
@@ -272,9 +274,9 @@
         <div>
           <div class="thresh-row">
             <div class="thresh-right">
-              <input type="range" min="8" max="100" value="20" step="1" name="max_turns"
+              <input type="range" min="8" max="100" value="100" step="1" name="max_turns"
                 oninput="this.nextElementSibling.textContent=this.value">
-              <span class="thresh-val">20</span>
+              <span class="thresh-val">100</span>
             </div>
             <span class="thresh-label" data-tooltip="Maximum proposition–opposition exchange cycles. Each turn = one full assert/challenge cycle. More turns allow deeper exploration but consume more tokens.">max turns</span>
           </div>
@@ -325,6 +327,8 @@
     </div>
 
     <div class="form-actions">
+      <span class="form-est-cost" id="new-est-cost" style="display:none"
+            data-tooltip="rough estimate from the chosen models and token budget — the Confirm screen shows the full breakdown and assumptions"></span>
       <a href="#/history" class="btn-ghost">cancel</a>
       <button type="submit" class="btn-primary incomplete" id="btn-new-submit">
         <i class="ti ti-arrow-right" aria-hidden="true"></i>
@@ -351,8 +355,13 @@
         <div class="confirm-row"><span class="confirm-key">proposition</span><span class="confirm-val" id="confirm-prop"></span></div>
         <div class="confirm-row"><span class="confirm-key">opposition</span><span class="confirm-val" id="confirm-opp"></span></div>
         <div class="confirm-row"><span class="confirm-key">moderator</span><span class="confirm-val" id="confirm-mod"></span></div>
+        <div class="confirm-row"><span class="confirm-key">synthesiser</span><span class="confirm-val" id="confirm-synth"></span></div>
         <div class="confirm-row"><span class="confirm-key">max turns</span><span class="confirm-val" id="confirm-turns"></span></div>
         <div class="confirm-row"><span class="confirm-key">token budget</span><span class="confirm-val" id="confirm-budget"></span></div>
+        <div class="confirm-row"><span class="confirm-key">est. cost</span><span class="confirm-val" id="confirm-cost"></span></div>
+        <div class="confirm-row" id="confirm-cost-note-row" style="display:none">
+          <span class="confirm-key"></span><span class="confirm-val-note" id="confirm-cost-note"></span>
+        </div>
         <div class="confirm-row"><span class="confirm-key">protocol mode</span><span class="confirm-val" id="confirm-mode"></span></div>
         <div class="confirm-row" id="confirm-experiment-row" style="display:none"><span class="confirm-key">experiment</span><span class="confirm-val" id="confirm-experiment"></span></div>
       </div>
@@ -475,6 +484,7 @@
         <span class="budget-label" id="budget-label">0 / 100,000 tokens used</span>
         <div class="budget-track"><div class="budget-fill" id="budget-fill" style="width:0%"></div></div>
         <span class="budget-pct" id="budget-pct">0%</span>
+        <span class="budget-cost" id="budget-cost" title="running dollar cost, from each act's recorded price">—</span>
       </div>
     </div>
 
@@ -564,7 +574,7 @@
   </div>
 
   <div class="card">
-    <div class="card-title"><i class="ti ti-cpu" aria-hidden="true"></i> token usage (all-time)</div>
+    <div class="card-title"><i class="ti ti-cpu" aria-hidden="true"></i> usage (all-time)</div>
     <div class="token-strip" style="margin-bottom:12px">
       <div class="tok-card">
         <div class="tok-label">total</div>
@@ -581,10 +591,15 @@
         <div class="tok-val" id="settings-tok-output">0</div>
         <div class="tok-model">all sessions</div>
       </div>
+      <div class="tok-card">
+        <div class="tok-label">spend</div>
+        <div class="tok-val" id="settings-cost-total">—</div>
+        <div class="tok-model" id="settings-cost-sub">all sessions</div>
+      </div>
     </div>
     <button class="btn-danger" id="btn-reset-tokens">
       <i class="ti ti-refresh" aria-hidden="true"></i>
-      reset display counter
+      reset display counters
     </button>
     <p class="pg-sub" style="margin-top:6px">resets the counter only — underlying data is preserved</p>
   </div>
@@ -608,17 +623,6 @@
       <label class="field-label" for="s-synth-model">synthesiser</label>
       <select class="model-select" id="s-synth-model"></select>
     </div>
-    <div class="field-row" style="margin-top:16px;align-items:flex-start;flex-direction:column;gap:6px">
-      <label class="field-label" for="s-openai-responses-mode"
-        data-tooltip="Controls whether OpenAI's Responses API is used for models that support it. 'auto' prefers it for gpt-5.6-* and falls back to Chat Completions if the model rejects it. 'prefer responses' tries Responses first for all OpenAI models. 'chat only' never uses the Responses API.">
-        OpenAI Responses API
-      </label>
-      <select class="model-select" id="s-openai-responses-mode" style="max-width:340px">
-        <option value="auto">auto — prefer for supported models, fall back to Chat</option>
-        <option value="prefer_responses">prefer Responses API for all OpenAI models</option>
-        <option value="chat_only">Chat Completions only (disable Responses API)</option>
-      </select>
-    </div>
   </div>
 
   <div class="card">
@@ -640,9 +644,9 @@
       <div>
         <div class="thresh-row">
           <div class="thresh-right">
-            <input type="range" min="8" max="100" value="20" step="1" id="s-max-turns"
+            <input type="range" min="8" max="100" value="100" step="1" id="s-max-turns"
               oninput="this.nextElementSibling.textContent=this.value">
-            <span class="thresh-val">20</span>
+            <span class="thresh-val">100</span>
           </div>
           <span class="thresh-label" data-tooltip="Maximum proposition–opposition exchange cycles. Each turn = one full assert/challenge cycle. More turns allow deeper exploration but consume more tokens.">max turns</span>
         </div>

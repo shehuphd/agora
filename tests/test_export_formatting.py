@@ -47,7 +47,7 @@ class TestStatusContent:
         assert "`⚠ repetitions: 3/2`" in out
 
     def test_zero_challenges_still_shown(self):
-        # 0 open challenges is a real reading, not a missing field.
+        # 0 open challenges is a valid reading, not a missing field.
         assert "`challenges open: 0`" in format_status_content(
             self._checks(outstanding_challenge_count=0))
 

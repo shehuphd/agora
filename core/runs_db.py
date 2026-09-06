@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS provider_models (
     provider      TEXT NOT NULL,
     model_id      TEXT NOT NULL,
     display_name  TEXT,
+    -- Vestigial as of the keycall migration (2026-08-09): keycall resolves
+    -- OpenAI's Responses-vs-Chat-Completions routing internally per model,
+    -- so this stopped being read anywhere. Left in the DDL rather than
+    -- dropped so existing databases don't need a live ALTER TABLE; new rows
+    -- just take the column default and nothing reads it back out.
     endpoint_type TEXT DEFAULT 'default',
     is_active     INTEGER DEFAULT 1,
     -- Set when the provider's inference endpoint rejected the model as
@@ -48,6 +53,13 @@ CREATE TABLE IF NOT EXISTS runs (
     opposition_nickname  TEXT,
     turn                 INTEGER DEFAULT 0,
     total_tokens         INTEGER DEFAULT 0,
+    -- Dollar cost of total_tokens, priced by core/cost.py (backed by the
+    -- `rates` registry) at run-close time. NULL when no role's model could
+    -- be priced at all. cost_partial=1 means total_cost_usd sums only the
+    -- roles that could be priced — some roles' cost is unknown,
+    -- not zero, so the sum understates the true total.
+    total_cost_usd       REAL DEFAULT NULL,
+    cost_partial         INTEGER DEFAULT 0,
     experiment_id        TEXT,
     continued_from       TEXT,
     config               TEXT,
@@ -58,7 +70,72 @@ CREATE TABLE IF NOT EXISTS experiments (
     experiment_id TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
     description   TEXT,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    -- Stored experiment design: base config + factors + replicates (or an
+    -- explicit row list, for CSV imports). NULL for bucket-style experiments
+    -- that only group hand-assigned runs.
+    spec          TEXT,
+    -- Environment record from the spec's first launch: package versions,
+    -- price snapshot date, git commit. JSON; NULL until a launch happens.
+    manifest      TEXT
+);
+
+-- Batch execution state. Persisted so a server restart mid-batch leaves an
+-- inspectable record instead of orphaning every in-flight row: on startup,
+-- rows still marked running are stamped 'interrupted' and can be retried.
+CREATE TABLE IF NOT EXISTS batch_jobs (
+    job_id        TEXT PRIMARY KEY,
+    experiment_id TEXT,
+    status        TEXT DEFAULT 'queued',
+    -- Optional spend ceiling for the whole job, checked between row launches
+    -- against the recorded cost of the job's closed runs. NULL = no ceiling.
+    budget_usd    REAL,
+    created_at    TEXT,
+    finished_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS batch_rows (
+    job_id      TEXT NOT NULL,
+    row_idx     INTEGER NOT NULL,
+    topic       TEXT,
+    config      TEXT,
+    -- Factor levels this row represents when the job came from a spec
+    -- expansion, e.g. {"proposition_model": "kimi-k3", "replicate": 2}.
+    -- JSON; NULL for CSV rows without a condition.
+    condition   TEXT,
+    -- pending | running | done | failed | interrupted | skipped
+    status      TEXT DEFAULT 'pending',
+    run_id      TEXT,
+    error       TEXT,
+    started_at  TEXT,
+    finished_at TEXT,
+    PRIMARY KEY (job_id, row_idx)
+);
+
+-- Per-run metrics computed at close (and backfilled for older closed runs)
+-- from data the run already recorded — acts, sources.json, search_log.jsonl.
+-- Never from a fresh model call: every value here is priced at zero.
+-- NULL means unknown (the source data predates the field), not zero.
+CREATE TABLE IF NOT EXISTS run_metrics (
+    run_id               TEXT PRIMARY KEY,
+    computed_at          TEXT,
+    completed            INTEGER,
+    closure_reason       TEXT,
+    turns                INTEGER,
+    total_tokens         INTEGER,
+    total_cost_usd       REAL,
+    cost_partial         INTEGER,
+    challenge_count      INTEGER,
+    challenge_types_used INTEGER,
+    concession_count     INTEGER,
+    citable_acts         INTEGER,
+    cited_acts           INTEGER,
+    citation_coverage    REAL,
+    retries              INTEGER,
+    argument_map_ok      INTEGER,
+    search_calls         INTEGER,
+    search_tiers         TEXT,
+    citation_repairs     INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
@@ -79,6 +156,12 @@ def init(conn: sqlite3.Connection) -> None:
     # Additive migrations for databases created before a column existed.
     for stmt in (
         "ALTER TABLE provider_models ADD COLUMN unservable INTEGER DEFAULT 0",
+        "ALTER TABLE runs ADD COLUMN total_cost_usd REAL DEFAULT NULL",
+        "ALTER TABLE runs ADD COLUMN cost_partial INTEGER DEFAULT 0",
+        "ALTER TABLE runs ADD COLUMN condition TEXT",
+        "ALTER TABLE experiments ADD COLUMN spec TEXT",
+        "ALTER TABLE experiments ADD COLUMN manifest TEXT",
+        "ALTER TABLE run_metrics ADD COLUMN citation_repairs INTEGER",
     ):
         try:
             conn.execute(stmt)
@@ -100,16 +183,17 @@ def insert_run(
     opposition_nickname: str,
     continued_from: str | None = None,
     config_json: str = "",
+    condition: str | None = None,
 ) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO runs
            (run_id, run_dir, created_at, status, debate_title, topic,
             steelman_mode, proposition_nickname, opposition_nickname,
-            continued_from, config)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            continued_from, config, condition)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, run_dir, created_at, "running", debate_title, topic,
          int(steelman_mode), proposition_nickname, opposition_nickname,
-         continued_from, config_json),
+         continued_from, config_json, condition),
     )
     conn.commit()
 
@@ -122,12 +206,16 @@ def update_on_close(
     debate_title: str,
     turn: int,
     total_tokens: int,
+    total_cost_usd: float | None = None,
+    cost_partial: bool = False,
 ) -> None:
     conn.execute(
         """UPDATE runs
-           SET status=?, closure_reason=?, debate_title=?, turn=?, total_tokens=?
+           SET status=?, closure_reason=?, debate_title=?, turn=?, total_tokens=?,
+               total_cost_usd=?, cost_partial=?
            WHERE run_id=?""",
-        (status, closure_reason, debate_title, turn, total_tokens, run_id),
+        (status, closure_reason, debate_title, turn, total_tokens,
+         total_cost_usd, int(cost_partial), run_id),
     )
     conn.commit()
 
@@ -142,7 +230,8 @@ def list_runs(conn: sqlite3.Connection, limit: int = 50, offset: int = 0) -> dic
     rows = conn.execute(
         """SELECT r.run_id, r.run_dir, r.created_at, r.status, r.debate_title, r.topic,
                   r.closure_reason, r.steelman_mode, r.proposition_nickname, r.opposition_nickname,
-                  r.turn, r.total_tokens, r.experiment_id, r.continued_from,
+                  r.turn, r.total_tokens, r.total_cost_usd, r.cost_partial,
+                  r.experiment_id, r.continued_from,
                   e.name AS experiment_name
            FROM runs r
            LEFT JOIN experiments e ON e.experiment_id = r.experiment_id
@@ -163,6 +252,8 @@ def list_runs(conn: sqlite3.Connection, limit: int = 50, offset: int = 0) -> dic
             "opposition_nickname":  r["opposition_nickname"]  or "O",
             "turn":                 r["turn"]         or 0,
             "total_tokens":         r["total_tokens"] or 0,
+            "total_cost_usd":       r["total_cost_usd"],
+            "cost_partial":         bool(r["cost_partial"]),
             "experiment_id":        r["experiment_id"],
             "experiment_name":      r["experiment_name"],
             "continued_from":       r["continued_from"],
@@ -220,10 +311,21 @@ def list_experiments(conn: sqlite3.Connection) -> list:
 
 def get_experiment(conn: sqlite3.Connection, experiment_id: str) -> dict | None:
     row = conn.execute(
-        "SELECT experiment_id, name, description, created_at FROM experiments WHERE experiment_id=?",
+        "SELECT experiment_id, name, description, created_at, spec, manifest "
+        "FROM experiments WHERE experiment_id=?",
         (experiment_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def set_experiment_spec(conn: sqlite3.Connection, experiment_id: str, spec_json: str | None) -> None:
+    conn.execute("UPDATE experiments SET spec=? WHERE experiment_id=?", (spec_json, experiment_id))
+    conn.commit()
+
+
+def set_experiment_manifest(conn: sqlite3.Connection, experiment_id: str, manifest_json: str) -> None:
+    conn.execute("UPDATE experiments SET manifest=? WHERE experiment_id=?", (manifest_json, experiment_id))
+    conn.commit()
 
 
 def find_experiment_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
@@ -248,7 +350,7 @@ def list_experiment_runs(conn: sqlite3.Connection, experiment_id: str, runs_dir:
     rows = conn.execute(
         """SELECT run_id, run_dir, created_at, status, debate_title, topic,
                   closure_reason, steelman_mode, proposition_nickname, opposition_nickname,
-                  turn, total_tokens, continued_from
+                  turn, total_tokens, total_cost_usd, cost_partial, continued_from, condition
            FROM runs WHERE experiment_id=? ORDER BY created_at DESC""",
         (experiment_id,),
     ).fetchall()
@@ -268,7 +370,10 @@ def list_experiment_runs(conn: sqlite3.Connection, experiment_id: str, runs_dir:
             "opposition_nickname":  r["opposition_nickname"]  or "O",
             "turn":                 r["turn"]         or 0,
             "total_tokens":         r["total_tokens"] or 0,
+            "total_cost_usd":       r["total_cost_usd"],
+            "cost_partial":         bool(r["cost_partial"]),
             "continued_from":       r["continued_from"],
+            "condition":            json.loads(r["condition"]) if r["condition"] else None,
             "orphaned":             orphaned,
         })
     return items
@@ -294,6 +399,214 @@ def list_unassigned_runs(conn: sqlite3.Connection, limit: int = 100) -> list:
 
 
 # ------------------------------------------------------------------
+# Batch jobs — durable state for core/batch.py
+# ------------------------------------------------------------------
+
+def insert_batch_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: str,
+    experiment_id: str | None,
+    rows: list[dict],
+    budget_usd: float | None = None,
+    created_at: str | None = None,
+) -> None:
+    """Create a job and its rows in one transaction.
+
+    Each entry in `rows` is {"topic": str, "config": dict, "condition": dict|None}.
+    """
+    created = created_at or datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO batch_jobs (job_id, experiment_id, status, budget_usd, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (job_id, experiment_id, "queued", budget_usd, created),
+    )
+    conn.executemany(
+        "INSERT INTO batch_rows (job_id, row_idx, topic, config, condition, status) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (job_id, i, r.get("topic", ""), json.dumps(r.get("config") or {}),
+             json.dumps(r["condition"]) if r.get("condition") else None, "pending")
+            for i, r in enumerate(rows)
+        ],
+    )
+    conn.commit()
+
+
+def get_batch_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
+    job = conn.execute(
+        "SELECT job_id, experiment_id, status, budget_usd, created_at, finished_at "
+        "FROM batch_jobs WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    if not job:
+        return None
+    rows = conn.execute(
+        "SELECT row_idx, topic, config, condition, status, run_id, error, started_at, finished_at "
+        "FROM batch_rows WHERE job_id=? ORDER BY row_idx",
+        (job_id,),
+    ).fetchall()
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {
+        "job_id":        job["job_id"],
+        "experiment_id": job["experiment_id"],
+        "status":        job["status"],
+        "budget_usd":    job["budget_usd"],
+        "created_at":    job["created_at"],
+        "finished_at":   job["finished_at"],
+        "total":         len(rows),
+        "done":          counts.get("done", 0),
+        "failed":        counts.get("failed", 0),
+        "running":       counts.get("running", 0),
+        "pending":       counts.get("pending", 0),
+        "interrupted":   counts.get("interrupted", 0),
+        "skipped":       counts.get("skipped", 0),
+        "rows": [
+            {
+                "row_idx":     r["row_idx"],
+                "topic":       r["topic"],
+                "config":      json.loads(r["config"]) if r["config"] else {},
+                "condition":   json.loads(r["condition"]) if r["condition"] else None,
+                "status":      r["status"],
+                "run_id":      r["run_id"],
+                "error":       r["error"],
+                "started_at":  r["started_at"],
+                "finished_at": r["finished_at"],
+            }
+            for r in rows
+        ],
+    }
+
+
+def update_batch_row(
+    conn: sqlite3.Connection, job_id: str, row_idx: int, *,
+    status: str,
+    run_id: str | None = None,
+    error: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+) -> None:
+    conn.execute(
+        """UPDATE batch_rows
+           SET status=?,
+               run_id=COALESCE(?, run_id),
+               error=COALESCE(?, error),
+               started_at=COALESCE(?, started_at),
+               finished_at=COALESCE(?, finished_at)
+           WHERE job_id=? AND row_idx=?""",
+        (status, run_id, error, started_at, finished_at, job_id, row_idx),
+    )
+    conn.commit()
+
+
+def set_batch_job_status(
+    conn: sqlite3.Connection, job_id: str, status: str,
+    finished_at: str | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE batch_jobs SET status=?, finished_at=COALESCE(?, finished_at) WHERE job_id=?",
+        (status, finished_at, job_id),
+    )
+    conn.commit()
+
+
+def mark_interrupted_batches(conn: sqlite3.Connection) -> int:
+    """Stamp rows and jobs a dead server left mid-flight.
+
+    Called once at worker startup, before anything is dequeued: a row still
+    marked running belongs to a process that no longer exists. Returns the
+    number of rows stamped.
+    """
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "UPDATE batch_rows SET status='interrupted', "
+        "error='server stopped while this row was running', finished_at=? "
+        "WHERE status IN ('running', 'pending') AND job_id IN "
+        "(SELECT job_id FROM batch_jobs WHERE status IN ('queued', 'running'))",
+        (now,),
+    )
+    conn.execute(
+        "UPDATE batch_jobs SET status='interrupted', finished_at=? "
+        "WHERE status IN ('queued', 'running')",
+        (now,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def batch_job_spent_usd(conn: sqlite3.Connection, job_id: str) -> tuple[float, bool]:
+    """Recorded spend of the job's closed runs, for the budget ceiling check.
+
+    Returns (total, partial): partial=True when any counted run was itself
+    cost-partial or any finished row's run has no recorded cost — the total
+    is then a minimum, which is the safe direction for a ceiling.
+    """
+    rows = conn.execute(
+        """SELECT r.total_cost_usd, r.cost_partial
+           FROM batch_rows b JOIN runs r ON r.run_id = b.run_id
+           WHERE b.job_id=? AND b.run_id IS NOT NULL AND r.status != 'running'""",
+        (job_id,),
+    ).fetchall()
+    total = 0.0
+    partial = False
+    for r in rows:
+        if r["total_cost_usd"] is None:
+            partial = True
+        else:
+            total += r["total_cost_usd"]
+            partial = partial or bool(r["cost_partial"])
+    return total, partial
+
+
+# ------------------------------------------------------------------
+# Run metrics — written by core/metrics.py
+# ------------------------------------------------------------------
+
+_METRIC_FIELDS = (
+    "completed", "closure_reason", "turns", "total_tokens", "total_cost_usd",
+    "cost_partial", "challenge_count", "challenge_types_used", "concession_count",
+    "citable_acts", "cited_acts", "citation_coverage", "retries",
+    "argument_map_ok", "search_calls", "search_tiers", "citation_repairs",
+)
+
+
+def upsert_run_metrics(conn: sqlite3.Connection, run_id: str, metrics: dict) -> None:
+    values = [metrics.get(f) for f in _METRIC_FIELDS]
+    placeholders = ",".join("?" for _ in _METRIC_FIELDS)
+    conn.execute(
+        f"INSERT OR REPLACE INTO run_metrics (run_id, computed_at, {','.join(_METRIC_FIELDS)}) "
+        f"VALUES (?,?,{placeholders})",
+        [run_id, datetime.utcnow().isoformat(), *values],
+    )
+    conn.commit()
+
+
+def get_run_metrics_map(conn: sqlite3.Connection, run_ids: list[str]) -> dict[str, dict]:
+    """Metrics keyed by run_id for the given runs; absent ids are omitted."""
+    if not run_ids:
+        return {}
+    marks = ",".join("?" for _ in run_ids)
+    rows = conn.execute(
+        f"SELECT run_id, computed_at, {','.join(_METRIC_FIELDS)} "
+        f"FROM run_metrics WHERE run_id IN ({marks})",
+        run_ids,
+    ).fetchall()
+    return {r["run_id"]: dict(r) for r in rows}
+
+
+def runs_missing_metrics(conn: sqlite3.Connection) -> list[dict]:
+    """Closed runs with no metrics row yet — the backfill work list."""
+    rows = conn.execute(
+        """SELECT r.run_id, r.run_dir FROM runs r
+           LEFT JOIN run_metrics m ON m.run_id = r.run_id
+           WHERE r.status != 'running' AND m.run_id IS NULL"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------
 # Provider model registry CRUD
 # ------------------------------------------------------------------
 
@@ -307,17 +620,15 @@ def upsert_provider_models(conn: sqlite3.Connection, provider: str, models: list
     conn.execute("UPDATE provider_models SET is_active=0 WHERE provider=?", (provider,))
     for m in models:
         conn.execute(
-            """INSERT INTO provider_models (provider, model_id, display_name, endpoint_type, is_active, last_updated)
-               VALUES (?,?,?,?,1,?)
+            """INSERT INTO provider_models (provider, model_id, display_name, is_active, last_updated)
+               VALUES (?,?,?,1,?)
                ON CONFLICT(provider, model_id) DO UPDATE SET
                  display_name   = excluded.display_name,
-                 endpoint_type  = excluded.endpoint_type,
                  -- A model proven uncallable stays retired however many times
                  -- the provider keeps advertising it.
                  is_active      = CASE WHEN provider_models.unservable=1 THEN 0 ELSE 1 END,
                  last_updated   = excluded.last_updated""",
-            (provider, m["model_id"], m.get("display_name", m["model_id"]),
-             m.get("endpoint_type", "default"), now),
+            (provider, m["model_id"], m.get("display_name", m["model_id"]), now),
         )
     conn.commit()
 
@@ -349,14 +660,14 @@ def mark_model_unservable(conn: sqlite3.Connection, provider: str, model_id: str
 
 
 class ModelNotRoutable(ValueError):
-    """A model selection could not be resolved to exactly one registry entry."""
+    """A model selection could not be resolved to a single registry entry."""
 
 
 def resolve_model(conn: sqlite3.Connection, model_id: str,
                   provider: str | None = None) -> dict:
     """Resolve a selection to the one entry that says how to call it.
 
-    Returns {"provider", "model_id", "endpoint_type"}.
+    Returns {"provider", "model_id"}.
 
     The registry is the only credible source, and it is not an inference: rows
     are written by whichever adapter enumerated the model, using that provider's
@@ -367,14 +678,14 @@ def resolve_model(conn: sqlite3.Connection, model_id: str,
     owned_by=anthropic.
 
     Pass `provider` to pin a specific vendor. It is required whenever more than
-    one serves the id, which is a real case worth supporting deliberately:
+    one serves the id, which is a legitimate case, supported deliberately:
     kimi-k3 direct from Moonshot and the same model resold by Perplexity are
     different endpoints, keys, and prices, and a debate may legitimately want
     one on each side.
     """
     if provider:
         rows = conn.execute(
-            "SELECT provider, model_id, endpoint_type FROM provider_models "
+            "SELECT provider, model_id FROM provider_models "
             "WHERE model_id=? AND provider=? AND is_active=1",
             (model_id, provider),
         ).fetchall()
@@ -386,7 +697,7 @@ def resolve_model(conn: sqlite3.Connection, model_id: str,
         return dict(rows[0])
 
     rows = conn.execute(
-        "SELECT provider, model_id, endpoint_type FROM provider_models "
+        "SELECT provider, model_id FROM provider_models "
         "WHERE model_id=? AND is_active=1 ORDER BY provider",
         (model_id,),
     ).fetchall()
@@ -417,7 +728,7 @@ def list_available_models(
     models are sorted alphabetically by model_id.
     """
     rows = conn.execute(
-        """SELECT provider, model_id, display_name, endpoint_type
+        """SELECT provider, model_id, display_name
            FROM provider_models WHERE is_active=1
            ORDER BY model_id"""
     ).fetchall()

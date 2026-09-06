@@ -1060,6 +1060,7 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
 .confirm-row:last-child { margin-bottom: 0; }
 .confirm-key      { color: var(--text-muted); white-space: nowrap; }
 .confirm-val      { color: var(--text-primary); font-weight: 600; text-align: right; }
+.confirm-val-note { color: var(--text-muted); font-size: 11px; text-align: right; font-weight: 400; flex: 1; }
 .confirm-actions  { display: flex; gap: 10px; }
 .confirm-model-warn {
   font-size: 13px;
@@ -1136,6 +1137,12 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
 .budget-track  { flex: 0 0 120px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
 .budget-fill   { height: 100%; border-radius: 2px; background: var(--fill-warning); transition: width 0.3s; }
 .budget-pct    { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); min-width: 32px; }
+.budget-cost   { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); white-space: nowrap; }
+.history-spend { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); text-align: right; padding: 8px 12px 0; }
+.form-est-cost { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); margin-right: auto; align-self: center; }
+.exp-batch-est { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); margin-left: auto; margin-right: 12px; }
+.exp-import-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.exp-row-est   { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
 
 /* --- Termination tracker --- */
 .term-tracker {
@@ -1296,6 +1303,7 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
 .act-type  { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
 .act-label { font-size: 11px; color: var(--text-muted); }
 .act-turn  { font-size: 11px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
+.act-cost  { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
 
 .act-text   { font-size: 14px; color: var(--text-primary); line-height: 1.7; padding-left: 9px; }
 .act-target { font-size: 11px; color: var(--text-muted); margin-top: 6px; padding-left: 9px; font-family: var(--font-mono); }
@@ -2056,3 +2064,128 @@ input[type="range"]::-moz-range-progress { background: var(--fill-accent); heigh
   .exp-layout { grid-template-columns: 1fr; height: auto; }
   .exp-sidebar { border-right: none; border-bottom: 1px solid var(--border); max-height: 40vh; }
 }
+
+/* --- Experiment design panel + spec builder + comparison --- */
+
+.exp-design-panel { margin-bottom: 18px; }
+.exp-design-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.exp-design-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 13px;
+}
+.exp-design-label { font-weight: 600; color: var(--text-secondary); }
+.exp-manifest { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.exp-design-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.exp-budget-label, .exp-extend-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.exp-budget-inp { width: 70px; font-size: 12px; padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-1); color: var(--text-primary); }
+.exp-extend-inp { width: 48px; font-size: 12px; padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-1); color: var(--text-primary); }
+
+.exp-spec-form {
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.exp-spec-help { font-size: 12px; color: var(--text-muted); }
+.exp-spec-base {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.exp-spec-base label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.exp-spec-base input {
+  font-size: 13px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.exp-spec-base label:first-child { flex: 1; min-width: 260px; }
+.exp-factor-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.exp-factor-field {
+  font-size: 12px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.exp-factor-levels {
+  flex: 1;
+  font-size: 13px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.exp-spec-actions { display: flex; gap: 8px; }
+
+.exp-comparison { margin-bottom: 18px; }
+.exp-cmp-title { font-size: 14px; margin-bottom: 2px; }
+.exp-cmp-note { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
+.exp-cmp-wrap { overflow-x: auto; }
+.exp-cmp-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.exp-cmp-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+.exp-cmp-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.exp-cmp-range { color: var(--text-muted); font-size: 11px; }
+.exp-import-name-row { display: flex; gap: 10px; align-items: center; }
+.exp-import-name-row .exp-name-inp { flex: 1; }

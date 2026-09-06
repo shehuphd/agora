@@ -1,166 +1,32 @@
 # Agora — Structured Multi-Agent Debate System
 
-Agora runs structured debates between two LLM agents using a typed speech-act protocol. A Proposition agent asserts falsifiable claims, an Opposition agent challenges them across multiple dimensions, a Moderator enforces legal act sequences and termination conditions, and a Synthesiser produces an argument map after closure.
+Agora runs structured debates between LLM agents using a typed speech-act protocol. A Proposition agent asserts falsifiable claims, an Opposition agent challenges them across a rotating taxonomy, a Moderator enforces legal act sequences and termination conditions, and a Synthesiser produces an argument map after closure. Claims are grounded through live web search, every citation is verified against the actual search results, and every act records its tokens and dollar cost.
 
-Supports any combination of Anthropic, OpenAI, Google Gemini, and Perplexity models — including cross-provider debates (e.g. Claude vs Gemini). Runs locally with no external services beyond the LLM APIs.
-
-Built by [Mo Shehu](https://mohammedshehu.com).
+Free-form "debate me" prompts drift, repeat, and invent sources; Agora exists to make model-vs-model argument measurable. Any seat can run any model from Anthropic, OpenAI, Google, Perplexity, Moonshot, or xAI, including cross-provider matchups, and an experiment engine runs whole condition matrices (models × settings × replicates) as durable batches with per-condition comparison and a tidy dataset export. Everything runs locally with no services beyond the LLM APIs.
 
 ## Quick start
+
+Check you have Python 3.10+ (`python3 --version`; install from [python.org/downloads](https://www.python.org/downloads/) if not).
+
+macOS: double-click `launch.command`. It stops any instance still running, creates the virtual environment, installs dependencies when they change, picks a free port, and starts the server.
+
+Or manually:
 
 ```bash
 git clone https://github.com/shehuphd/agora
 cd agora
-pip install -r requirements.txt
-cp .env.example .env          # add at least one LLM key; optionally SERPER_API_KEY for flat-cost search
-uvicorn api.main:app --reload --port 8502
+python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env          # add at least one LLM provider key
+.venv/bin/uvicorn api.main:app --port 8502
 ```
 
-Open [http://localhost:8502](http://localhost:8502).
+Open [http://localhost:8502](http://localhost:8502), follow the onboarding wizard, and launch a debate from the New Debate screen. The debate view streams every act live with a token budget bar, a running dollar total, and pause/end controls.
 
-## Screens
+## Documentation
 
-| Screen | Route | Description |
-|--------|-------|-------------|
-| History | `#/history` | All past sessions sorted by start time; click-sortable by title, turns, tokens, status; per-row export |
-| New Debate | `#/new` | Full config: topic, models, nicknames, temperature, aggression, protocol thresholds |
-| Confirm | `#/confirm` | Review all settings before launching |
-| Debate View | `#/debate/:id` | Live act stream via SSE; token budget bar; termination tracker; pause and end controls |
-| Experiments | `#/experiments` | Group runs into experiments; CSV batch import with parallel execution |
-| Traces | `#/traces` | Query and inspect traceact traces; launch the full viewer |
-| Settings | `#/settings` | API keys, search backend status, agent defaults, protocol defaults, onboarding wizard |
+- [USAGE.md](USAGE.md): the full manual, covering every screen, the protocol, grounding and citations, experiments, costs, exports, and troubleshooting
+- [ARCHITECTURE.md](ARCHITECTURE.md): how it's built, from the turn loop to the data stores, batch engine, and module contracts
+- [MANIFEST.md](MANIFEST.md): every source file and what it does
+- [CHANGELOG.md](CHANGELOG.md): dated release history
 
-## Architecture
-
-| Layer | Directory | Responsibility |
-|-------|-----------|----------------|
-| Protocol | `core/` | State, grammar, termination, checkpointing, typed config |
-| Agents | `agents/` | LLM wrappers: Proposition, Opposition, Moderator, Synthesiser |
-| Runner | `runners/` | Async turn loop; SSE event queue; TurnOrchestrator |
-| API | `api/` | FastAPI routers and Pydantic models |
-| Frontend | `static/` | Hash-routed SPA — ES modules, no build step |
-
-## Debate protocol
-
-### Speech acts
-
-| Act | Who | Description |
-|-----|-----|-------------|
-| ASSERT | Proposition | Introduce a falsifiable claim |
-| CHALLENGE | Opposition | Attack a claim; multi-angle (up to 3 per act, one paragraph each) |
-| REVISE | Proposition | Narrow or update a challenged claim |
-| DEFEND | Proposition | Justify a challenged claim with new evidence |
-| CONCEDE | Opposition | Yield a point — only after ≥3 challenge types used |
-| PROPOSE | Proposition | Signal readiness to close |
-| STEELMAN | Opposition | (Rapoport mode) Accurately restate proposition's claim before challenging |
-| ACCEPT_STEELMAN | Proposition | Accept the restatement; challenge may proceed |
-| REJECT_STEELMAN | Proposition | Reject the restatement; opposition must re-state |
-| STATUS | Moderator | Summarise turn; flag sourcing gaps; track termination conditions |
-| CLOSE | Moderator | End the debate with a closure summary and reason |
-| ARGUMENT_MAP | Synthesiser | Structured post-debate analysis |
-
-### Challenge taxonomy
-
-The Opposition is required to rotate through challenge types and is explicitly prompted with randomly selected unused types each turn:
-
-`sourcing` · `premise` · `causality` · `significance` · `definition` · `comparison` · `completeness` · `consistency`
-
-### Modes
-
-**Standard** — Proposition asserts, Opposition challenges, Proposition defends or revises, repeat.
-
-**Rapoport** (steelman required) — Before every challenge, Opposition must accurately restate the proposition's claim. Proposition may accept or reject the restatement. Enforces charitable interpretation.
-
-### Termination
-
-Hard stops (immediate): `max_turns`, `max_time_minutes`, `token_budget`.
-
-Soft stops (Moderator-evaluated): challenge rate floor below `min_challenges` across the session, PROPOSE met with CONCEDE, repetition of previously revised claim content.
-
-User-requested end: the End button triggers an orderly close — the Moderator receives a `user_requested_end` signal, issues a CLOSE act, and the Synthesiser runs normally.
-
-## Supported models
-
-| Provider | Models |
-|----------|--------|
-| Anthropic | `claude-sonnet-4-6`, `claude-opus-4-8`, `claude-haiku-4-5` |
-| OpenAI (GPT-5) | `gpt-5.6` (Sol), `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5` |
-| OpenAI (GPT-4 / o-series) | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o3`, `o3-mini`, `o4-mini`, `o1` |
-| Google | `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash` |
-| Perplexity | `sonar`, `sonar-pro`, `sonar-deep-research` |
-
-Any agent role can be assigned any model from any provider. Model dropdowns are gated by key presence — a model whose provider key is absent is shown as disabled.
-
-## Configuration
-
-All thresholds are set per-run in the New Debate form and stored in the session record. Defaults are read from `config/defaults.yaml` and configurable in Settings.
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `max_turns` | 20 | Hard turn ceiling |
-| `max_time_minutes` | 15 | Wall-clock limit |
-| `token_budget` | 100,000 | Aggregate token limit across all agents |
-| `min_challenges` | 5 | Minimum challenge acts before soft-stop |
-| `min_concessions` | 2 | Minimum concessions expected |
-| `repetition_tolerance` | 2 | Max repeated claim cycles before closure |
-| `aggression` | 0.5 | Opposition aggression: 0 = cautious, 1 = challenge everything |
-
-## Web search
-
-Debaters ground claims through web search. A neutral search backend keeps retrieval off the token budget:
-
-| Tier | Config | Cost |
-|------|--------|------|
-| SearXNG (preferred) | `SEARXNG_URL` in `.env` or self-host via Docker | Free |
-| Serper | `SERPER_API_KEY` in `.env` | ~$1 per 1k searches |
-| Provider fallback | No config needed | Token-billed (warning shown) |
-
-The fallback chain tries SearXNG first, then Serper, then the LLM provider's built-in search. A first-launch onboarding wizard walks through setup.
-
-## API keys
-
-Keys are set in `.env`. The Settings screen shows whether each key is present and lets you paste a new key inline — no server restart needed. If a key causes a quota-exhaustion error mid-debate, a warning badge appears on that key in Settings and clears when the key is updated.
-
-```
-ANTHROPIC_API_KEY=...
-OPENAI_API_KEY=...
-GOOGLE_API_KEY=...
-PERPLEXITY_API_KEY=...
-SERPER_API_KEY=...
-SEARXNG_URL=http://127.0.0.1:8888
-```
-
-At least one LLM key is required. Only providers with a key present will have their models available in the debate form.
-
-## Output
-
-Each run creates a directory under `runs/` containing:
-
-- `debate.db` — SQLite database with `sessions`, `acts`, and `claims` tables
-- `config.json` — full run config snapshot
-- `overrides.json` — log of any mid-run adjustments
-
-Export a run (JSON or Markdown) from the history table or the debate view.
-
-## Security
-
-All agent prompts use a system/user message split. Agent content never appears in the system prompt. An allowlist (`_ALLOWED_ACT_TYPES`) rejects any act type a role is not permitted to emit. Input is sanitised to strip structural tags before insertion into prompts. API keys are written only to the local `.env` file and never returned in API responses.
-
-## Tracing
-
-All agent actions, searches, and API calls are traced via [traceact](https://github.com/traceact/traceact). Traces write to `data/traces/traces.jsonl` with 50MB rotation. The Traces screen queries them inline; the "open viewer" button launches traceact's full viewer pre-filtered to the selected run.
-
-## Tests
-
-```bash
-pytest tests/
-```
-
-79 tests covering: ActType enum, state transitions, `apply_act` for all act types, `_strip_and_parse`, allowlist enforcement, content truncation, and rolling history compaction.
-
-## Requirements
-
-- Python 3.10+
-- At least one API key in `.env`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, or `PERPLEXITY_API_KEY`
-- No database server — SQLite per session under `runs/`
-- Docker (optional) — for self-hosted SearXNG search
+By [Mo Shehu](https://mohammedshehu.com)

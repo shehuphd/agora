@@ -4,6 +4,7 @@ import hashlib
 import re
 from datetime import datetime
 from core.state import DialogueState, TERMINAL_STATUSES
+from core.config import DEFAULT_MAX_TURNS
 
 
 def check_termination(state: DialogueState, config: dict) -> tuple[bool, str | None]:
@@ -12,8 +13,10 @@ def check_termination(state: DialogueState, config: dict) -> tuple[bool, str | N
 
     # --- Hard stops ---
 
-    # Hard stop: maximum turn count reached
-    max_turns = proto.get("max_turns", 8)
+    # Hard stop: maximum turn count reached. config["protocol"]["max_turns"]
+    # is always populated by DebateRunConfig.to_termination_dict() — this
+    # fallback only guards a directly-constructed dict (e.g. in a test).
+    max_turns = proto.get("max_turns", DEFAULT_MAX_TURNS)
     if state.turn >= max_turns:
         return True, f"max_turns reached ({state.turn}/{max_turns})"
 

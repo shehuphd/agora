@@ -13,29 +13,10 @@ from core import batch as _batch
 
 router = APIRouter()
 
-# Canonical CSV columns and their DebateConfig equivalents.
-# All optional except topic.
-_COLUMNS = [
-    "topic",
-    "debate_title",
-    "proposition_model",
-    "opposition_model",
-    "moderator_model",
-    "synth_model",
-    "proposition_nickname",
-    "opposition_nickname",
-    "max_turns",
-    "max_time_minutes",
-    "token_budget",
-    "temperature_proposition",
-    "temperature_opposition",
-    "temperature_moderator",
-    "aggression",
-    "min_challenges",
-    "min_concessions",
-    "require_steelman",
-    "require_full_resolution",
-]
+# Canonical CSV columns and their DebateConfig equivalents — the same field
+# list experiment specs accept, kept in core/spec.py so the two input paths
+# can't drift apart. All optional except topic.
+from core.spec import SPEC_FIELDS as _COLUMNS
 
 _INT_COLS   = {"max_turns", "max_time_minutes", "token_budget", "min_challenges", "min_concessions"}
 _FLOAT_COLS = {"temperature_proposition", "temperature_opposition", "temperature_moderator", "aggression"}
@@ -86,6 +67,7 @@ async def create_batch(
     experiment_id: str = Form(default=""),
     experiment_name: str = Form(default=""),
     selected_rows: str = Form(default=""),
+    budget_usd: str = Form(default=""),
 ):
     """Parse a CSV upload and enqueue a batch of debate runs."""
     raw = await file.read()
@@ -151,28 +133,80 @@ async def create_batch(
             None, _find_or_create_experiment, name,
         )
 
+    budget: float | None = None
+    if budget_usd.strip():
+        try:
+            budget = float(budget_usd)
+            if budget <= 0:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=400, detail="budget_usd must be a positive number")
+
     with ActionTrace.start(action="batch.import", kind="app", actor="user",
                            project="agora", correlation_id=eid) as t:
-        t.input({"experiment_id": eid, "row_count": len(rows), "skipped": len(errors)})
-        job = _batch.create_job(experiment_id=eid, rows_data=rows)
-        await _batch.enqueue(job)
-        t.output({"job_id": job.job_id, "queued": len(rows)})
+        t.input({"experiment_id": eid, "row_count": len(rows),
+                 "skipped": len(errors), "budget_usd": budget})
+        # Save the parsed rows as an explicit-rows spec so the CSV batch is
+        # re-runnable from the experiment screen. Only when the experiment has
+        # no spec yet: a stored factor grid must not be clobbered by a CSV.
+        if eid:
+            def _store_spec():
+                import json as _json
+                from core import runs_db as _rdb
+                conn = _rdb.connect()
+                try:
+                    _rdb.init(conn)
+                    exp = _rdb.get_experiment(conn, eid)
+                    if exp is not None and not exp.get("spec"):
+                        _rdb.set_experiment_spec(
+                            conn, eid,
+                            _json.dumps({"rows": rows, "replicates": 1}),
+                        )
+                finally:
+                    conn.close()
+            await asyncio.get_running_loop().run_in_executor(None, _store_spec)
+
+        job_id = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: _batch.create_job(eid, [dict(r) for r in rows], budget_usd=budget),
+        )
+        await _batch.enqueue(job_id)
+        t.output({"job_id": job_id, "queued": len(rows)})
 
     return JSONResponse({
-        "job_id":        job.job_id,
+        "job_id":        job_id,
         "experiment_id": eid,
         "queued":   len(rows),
         "skipped":  len(errors),
         "warnings": errors,
-        "rows": [{"row_idx": r.row_idx, "topic": r.topic, "status": r.status}
-                 for r in job.rows],
     })
 
 
 @router.get("/api/batch/{job_id}")
 async def get_batch_status(job_id: str):
     """Poll the status of a batch job."""
-    job = _batch.get_job(job_id)
+    job = await asyncio.get_running_loop().run_in_executor(
+        None, _batch.get_job, job_id,
+    )
     if not job:
         raise HTTPException(status_code=404, detail="Batch job not found")
-    return JSONResponse(job.to_dict())
+    return JSONResponse(job)
+
+
+@router.post("/api/batch/{job_id}/retry")
+async def retry_batch(job_id: str):
+    """Re-run a job's failed, interrupted, and budget-skipped rows as a new job."""
+    with ActionTrace.start(action="batch.retry", kind="app", actor="user",
+                           project="agora", correlation_id=job_id) as t:
+        t.input({"source_job_id": job_id})
+        new_id = await asyncio.get_running_loop().run_in_executor(
+            None, _batch.create_retry_job, job_id,
+        )
+        if new_id is None:
+            t.output({"error": "nothing_to_retry"})
+            raise HTTPException(
+                status_code=400,
+                detail="No rows to retry — the job doesn't exist or every row finished",
+            )
+        await _batch.enqueue(new_id)
+        t.output({"job_id": new_id})
+    return JSONResponse({"job_id": new_id})

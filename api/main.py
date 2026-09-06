@@ -35,11 +35,9 @@ async def lifespan(app: FastAPI):
     )
     # Apply persisted settings at startup.
     from agents.base import set_history_window
-    from providers import configure as _configure_providers
     cfg = settings_router._load_config()
     hw = cfg.get("agent_settings", {}).get("history_window", 6)
     set_history_window(hw)
-    _configure_providers(cfg)
     # Initialise and backfill the runs index.
     import asyncio
     from core import runs_db as _runs_db
@@ -47,6 +45,18 @@ async def lifespan(app: FastAPI):
     # Start the batch job worker.
     from core import batch as _batch
     await _batch.start_worker()
+    # Warm the price registry off the request path: its stable tier makes one
+    # small network check for a newer published ledger, and warming here means
+    # that check happens at boot in a daemon thread, never inside a debate
+    # turn's first cost lookup.
+    import threading
+    from core import cost as _cost
+    threading.Thread(target=_cost._registry, daemon=True).start()
+    # Backfill metrics for closed runs that predate the run_metrics table.
+    # Incremental and idempotent, so a daemon thread at boot is enough: each
+    # run is its own unit of work and a crash costs only the remainder.
+    from core import metrics as _metrics
+    threading.Thread(target=_metrics.backfill_missing, args=(RUNS_DIR,), daemon=True).start()
     yield
 
 

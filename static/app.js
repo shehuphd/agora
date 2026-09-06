@@ -5,7 +5,7 @@ import { loadHistory, setHistoryPageSize }  from './history.js';
 import { loadDebate }   from './debate.js';
 import { loadExperiments } from './experiments.js';
 import { loadTraces } from './traces.js';
-import { esc, formatTokens } from './render.js';
+import { esc, formatTokens, formatCost } from './render.js';
 import { launchOnboarding, maybeAutoLaunch } from './onboarding.js';
 
 // ============================================================
@@ -30,6 +30,14 @@ function route() {
     const runId = hash.replace('#/debate/', '');
     document.getElementById('screen-debate').classList.add('on');
     loadDebate(runId);
+    return;
+  }
+
+  if (hash.startsWith('#/experiments/')) {
+    const eid = hash.replace('#/experiments/', '');
+    document.getElementById('screen-experiments').classList.add('on');
+    document.querySelector('a[href="#/experiments"]')?.classList.add('on');
+    loadExperiments(eid);
     return;
   }
 
@@ -183,7 +191,11 @@ async function _fetchAvailableModels() {
       // Purely a DOM transport encoding — it is split back into separate
       // model and provider fields before anything is sent or stored.
       key:      `${m.provider}${MODEL_KEY_SEP}${m.model_id}`,
-      label:    `${m.provider} ${m.display_name || m.model_id}`,
+      // Price hint straight from the recorded rates seam; a model rates
+      // can't price simply shows no figure rather than a wrong one.
+      label:    `${m.provider} ${m.display_name || m.model_id}` +
+                (m.input_mtok != null && m.output_mtok != null
+                  ? ` · $${m.input_mtok}/$${m.output_mtok} Mtok` : ''),
       provider: m.provider,
     }));
     window._knownModels = new Set(_availableModels.map(m => m.value));
@@ -409,13 +421,49 @@ async function loadNew() {
 
   topicEl?.addEventListener('input', _updateSubmitBtn);
 
+  // Live estimate under the form: refreshed (debounced) whenever a model or
+  // the token budget changes. Covers the three roles the form chooses;
+  // Confirm shows the full breakdown with assumptions stated.
+  let _estTimer = null;
+  const _updateFormEstimate = () => {
+    clearTimeout(_estTimer);
+    _estTimer = setTimeout(async () => {
+      const el = document.getElementById('new-est-cost');
+      if (!el) return;
+      const body = { token_budget: parseInt(document.querySelector('input[name="token_budget"]')?.value || 100) * 1000 };
+      let anyModel = false;
+      for (const [id, field] of [['prop-model', 'prop'], ['opp-model', 'opp'], ['mod-model', 'mod']]) {
+        const v = document.getElementById(id)?.value;
+        if (!v) continue;
+        const { provider, model } = splitModelKey(v);
+        body[`${field}_model`] = model;
+        if (provider) body[`${field}_provider`] = provider;
+        anyModel = true;
+      }
+      if (!anyModel) { el.style.display = 'none'; return; }
+      try {
+        const res = await fetch('/debates/estimate-cost', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const est = await res.json();
+        if (est.total_usd == null) { el.style.display = 'none'; return; }
+        el.style.display = '';
+        el.textContent = `≈ ${formatCost(est.total_usd)} at this budget`;
+      } catch { el.style.display = 'none'; }
+    }, 300);
+  };
+  document.querySelector('input[name="token_budget"]')?.addEventListener('input', _updateFormEstimate);
+
   ['prop-model', 'opp-model', 'mod-model'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
     _buildModelSelect(sel, keyStatus, DEFAULTS[id], true);
     sel.addEventListener('change', _updateSubmitBtn);
+    sel.addEventListener('change', _updateFormEstimate);
   });
   _updateSubmitBtn();
+  _updateFormEstimate();
   // Re-check after a tick to catch browser-restored textarea values (Chrome restores
   // form values after JS runs, with no input event).
   setTimeout(_updateSubmitBtn, 150);
@@ -470,7 +518,7 @@ async function loadNew() {
     }
 
     // Flash all missing required fields and abort. This runs even when the button looks incomplete
-    // so clicking always gives the user visual feedback about exactly what's missing.
+    // so clicking always gives the user visual feedback naming what's missing.
     const _flashEl = (el, eventName = 'input') => {
       el.classList.remove('field-error');
       void el.offsetWidth; // force reflow so animation restarts each click
@@ -524,6 +572,45 @@ async function loadNew() {
 // SCREEN 3: CONFIRM
 // ============================================================
 
+async function loadConfirmCostEstimate(cfg) {
+  const valEl  = document.getElementById('confirm-cost');
+  const noteRow = document.getElementById('confirm-cost-note-row');
+  const noteEl  = document.getElementById('confirm-cost-note');
+  valEl.textContent = '…';
+  noteRow.style.display = 'none';
+
+  try {
+    const res = await fetch('/debates/estimate-cost', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prop_model: cfg.prop_model, prop_provider: cfg.prop_provider,
+        opp_model:  cfg.opp_model,  opp_provider:  cfg.opp_provider,
+        mod_model:  cfg.mod_model,  mod_provider:  cfg.mod_provider,
+        synth_model: cfg.synth_model, synth_provider: cfg.synth_provider,
+        token_budget: cfg.token_budget,
+      }),
+    });
+    if (!res.ok) throw new Error(res.statusText);
+    const est = await res.json();
+
+    valEl.textContent = est.total_usd == null ? '—' : `≈ ${formatCost(est.total_usd)}`;
+
+    const a = est.assumptions;
+    const parts = [
+      `estimate assumes ${formatTokens(a.token_budget)} tokens split evenly across ${a.roles_counted} role${a.roles_counted === 1 ? '' : 's'}, ${Math.round(a.input_ratio * 100)}% in / ${Math.round(a.output_ratio * 100)}% out`,
+    ];
+    if (a.prices_as_of) parts.push(`prices as of ${a.prices_as_of}`);
+    if (est.unpriced_roles && est.unpriced_roles.length) {
+      parts.push(`no price available for: ${est.unpriced_roles.join(', ')}`);
+    }
+    noteEl.textContent = parts.join(' — ');
+    noteRow.style.display = '';
+  } catch {
+    valEl.textContent = '—';
+  }
+}
+
 function loadConfirm() {
   const raw = sessionStorage.getItem('pendingDebate');
   if (!raw) { window.location.hash = '#/new'; return; }
@@ -533,8 +620,10 @@ function loadConfirm() {
   document.getElementById('confirm-prop').textContent   = `${cfg.prop_nickname || 'Thesis'} · ${cfg.prop_model}`;
   document.getElementById('confirm-opp').textContent    = `${cfg.opp_nickname  || 'Antithesis'} · ${cfg.opp_model}`;
   document.getElementById('confirm-mod').textContent    = `${cfg.mod_nickname  || 'Arbiter'} · ${cfg.mod_model}`;
+  document.getElementById('confirm-synth').textContent  = cfg.synth_model || '—';
   document.getElementById('confirm-turns').textContent  = cfg.max_turns;
   document.getElementById('confirm-budget').textContent = `${Math.round(cfg.token_budget / 1000)}k tokens`;
+  loadConfirmCostEstimate(cfg);
   document.getElementById('confirm-mode').textContent   = cfg.require_steelman ? 'Rapoport (steelman required)' : 'standard';
   const expRow = document.getElementById('confirm-experiment-row');
   if (expRow) {
@@ -759,6 +848,11 @@ async function loadSettings() {
     document.getElementById('settings-tok-total').textContent  = formatTokens(t.total  || 0);
     document.getElementById('settings-tok-input').textContent  = formatTokens(t.input  || 0);
     document.getElementById('settings-tok-output').textContent = formatTokens(t.output || 0);
+    const c = data.cost_totals || {};
+    document.getElementById('settings-cost-total').textContent = formatCost(c.total_usd, c.partial);
+    const subParts = [c.partial ? 'minimum — some models unpriced' : 'all sessions'];
+    if (c.prices_as_of) subParts.push(`prices as of ${c.prices_as_of}`);
+    document.getElementById('settings-cost-sub').textContent = subParts.join(' · ');
 
     if (data.config?.protocol?.require_steelman) {
       document.getElementById('s-toggle-steelman').classList.add('on');
@@ -779,10 +873,6 @@ async function loadSettings() {
       if (!sel) return;
       _buildModelSelect(sel, keyStatus2, defaultModel, true, '— no preference —');
     });
-
-    // Responses API mode selector.
-    const responsesModeSel = document.getElementById('s-openai-responses-mode');
-    if (responsesModeSel) responsesModeSel.value = data.config?.openai?.responses_mode || 'auto';
 
     const hw = data.config?.agent_settings?.history_window;
     if (hw != null) {
@@ -848,9 +938,6 @@ async function loadSettings() {
         opposition:  { model: document.getElementById('s-opp-model')?.value  || null },
         moderator:   { model: document.getElementById('s-mod-model')?.value  || null },
         synthesiser: { model: document.getElementById('s-synth-model')?.value || null },
-      },
-      openai: {
-        responses_mode: document.getElementById('s-openai-responses-mode')?.value || 'auto',
       },
     };
     await fetch('/settings', {

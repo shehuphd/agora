@@ -12,7 +12,7 @@ export function esc(str) {
 // Apply inline markdown (bold, italic, strikethrough) to already-escaped HTML text.
 function _mdInline(rawText) {
   const result = [];
-  // Order matters: ~~ first, then ** (before *), then *
+  // Order is load-bearing: ~~ first, then ** (before *), then *
   const re = /~~(.+?)~~|\*\*(.+?)\*\*|\*([^*\n]+?)\*/g;
   let last = 0, m;
   while ((m = re.exec(rawText)) !== null) {
@@ -43,6 +43,17 @@ export function renderContent(text) {
 
 export function formatTokens(n) {
   return Math.round(n || 0).toLocaleString();
+}
+
+// usd is null when no priced model contributed to the total — that's
+// "unknown", shown as an em dash, never coerced to $0.00. partial means the
+// total sums only the roles that could be priced, so it understates the
+// true cost; the "+" makes that visible instead of presenting it as exact.
+export function formatCost(usd, partial) {
+  if (usd == null) return '—';
+  const abs = Math.abs(usd);
+  const text = abs > 0 && abs < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  return partial ? `${text}+` : text;
 }
 
 export function triggerDownload(blob, contentDisposition) {
@@ -125,6 +136,7 @@ export function appendActBubble(act) {
       <span class="act-type">${esc(act.act_type)}</span>
       ${label}
       <span class="act-turn">turn ${esc(act.turn)}</span>
+      ${act.cost_usd != null ? `<span class="act-cost" title="recorded cost of this act's model calls">${formatCost(act.cost_usd)}</span>` : ''}
     </div>
     <div class="act-text">${renderContent(act.content)}</div>
     ${act.reason        ? `<div class="act-target">reason: ${renderContent(act.reason)}</div>` : ''}
@@ -346,6 +358,8 @@ export function renderTokenStrip(tok, budget) {
   document.getElementById('budget-pct').textContent   = `${pct}%`;
   document.getElementById('budget-label').textContent =
     `${formatTokens(tok.total)} / ${formatTokens(budget)} tokens used`;
+  const costEl = document.getElementById('budget-cost');
+  if (costEl) costEl.textContent = formatCost(tok.cost ?? null, tok.unpriced);
 }
 
 // The tracker lives in static markup shared by every debate, so opening a new
@@ -369,7 +383,7 @@ function _setRepetition(count) {
 }
 
 export function updateTerminationTracker(checks, cfg) {
-  const maxTurns = checks.max_turns || cfg.max_turns || 8;
+  const maxTurns = checks.max_turns || cfg.max_turns || 100;
   const turns    = checks.turns_used || 0;
   const pct      = Math.min(100, Math.round((turns / maxTurns) * 100));
   document.getElementById('term-turns').style.width     = `${pct}%`;

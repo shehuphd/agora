@@ -21,6 +21,7 @@ class DebateConfig(BaseModel):
     proposition_model: Optional[str] = None
     opposition_model: Optional[str] = None
     moderator_model: Optional[str] = None
+    synthesiser_model: Optional[str] = None
     # Which vendor serves each model. Optional: only needed when more than one
     # provider offers the same model id (a model bought direct and the same
     # model resold by an aggregator are different endpoints, keys, and prices).
@@ -49,7 +50,10 @@ class DebateConfig(BaseModel):
     prop_temperature: Optional[float] = None
     opp_temperature: Optional[float] = None
     opp_aggression: Optional[float] = None
-    max_turns: int = 8
+    # None means "not specified" — DebateRunConfig.from_api() resolves it
+    # against config/defaults.yaml (core.config.DEFAULT_MAX_TURNS), the single
+    # source of truth for this value. No independent default lives here.
+    max_turns: Optional[int] = None
     max_time_minutes: int = 15
     token_budget: int = 100000
     min_challenges: int = 2
@@ -59,6 +63,22 @@ class DebateConfig(BaseModel):
     require_full_resolution: bool = False
     auto_generate_title: bool = True
     experiment_name: Optional[str] = None
+
+
+class CostEstimateRequest(BaseModel):
+    """Confirm-screen input for a pre-debate cost estimate. Mirrors the
+    short-name model/provider fields DebateConfig already accepts from the
+    New Debate form — no topic/protocol fields, since none of those affect
+    price."""
+    prop_model: Optional[str] = None
+    prop_provider: Optional[str] = None
+    opp_model: Optional[str] = None
+    opp_provider: Optional[str] = None
+    mod_model: Optional[str] = None
+    mod_provider: Optional[str] = None
+    synth_model: Optional[str] = None
+    synth_provider: Optional[str] = None
+    token_budget: int = 100000
 
 
 class ActResponse(BaseModel):
@@ -76,6 +96,7 @@ class ActResponse(BaseModel):
     output_tokens: int
     model_used: str
     timestamp: str
+    cost_usd: Optional[float] = None
 
 
 class DebateResponse(BaseModel):

@@ -106,7 +106,14 @@ def test_init_db_is_idempotent():
     """Calling init_db twice must not raise (CREATE TABLE IF NOT EXISTS)."""
     conn = _conn()
     init_db(conn)
-    init_db(conn)  # second call — must be silent
+    init_db(conn)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {"runs", "acts", "claims", "meta"} <= tables
 
 
 # ---------------------------------------------------------------------------

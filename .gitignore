@@ -16,6 +16,8 @@ build/
 
 test-data/
 
+# Runtime state, per machine
+config/key_warnings.json
+
 # Internal docs — not for public repo
-#internal/
-.internal/
+project/

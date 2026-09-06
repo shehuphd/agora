@@ -1,6 +1,6 @@
 """Shared evidence pool for a debate run.
 
-Proposition and Opposition retrieve from the web; everything they find lands
+Proposition and Opposition retrieve from the web; everything they find goes
 here. Every agent — including Moderator and Synthesiser, which never search —
 cites out of this pool. A URL that is not in the pool cannot be cited, which is
 what makes a fabricated link structurally impossible rather than merely
@@ -57,6 +57,8 @@ class Source:
     snippet: str = ""       # description of the content, when the provider gives one
     published: str = ""     # provider-reported date; evidence freshness, not description
     excerpt: str = ""       # extracted page text (markdown, capped) — untrusted web content
+    full_text: str = ""     # full extracted text, fetched once on first citation (quote checks)
+    full_text_fetched: bool = False  # a fetch was attempted; empty full_text then means it failed
     provider: str = ""
     harvested_by: str = ""      # agent role that ran the search
     query: str = ""             # search query that surfaced it
@@ -154,13 +156,79 @@ class SourcePool:
             + "\n[END EVIDENCE POOL]"
         )
 
+    # ---------------------------------------------------------- full text
+
+    # Full-text cap: enough for any article-length source, bounded so one PDF
+    # dump can't balloon sources.json.
+    _FULL_TEXT_MAX_CHARS = 40_000
+
+    def ensure_full_text(self, urls: list[str]) -> int:
+        """Fetch and store full extracted text for cited sources, once each.
+
+        Called at citation-check time: the first act that cites a source
+        triggers one HTTP fetch (zero tokens), and every later quote check
+        reads the stored text. A failed fetch is recorded so it is not
+        retried on every act — a bot-walled source stays quote-unverifiable
+        rather than costing a fetch per turn. Returns how many sources
+        gained text.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from core.search import fetch_page_markdown
+
+        with self._lock:
+            targets = [
+                self._by_url[normalise_url(u)]
+                for u in urls
+                if normalise_url(u) in self._by_url
+                and not self._by_url[normalise_url(u)].full_text_fetched
+            ]
+        if not targets:
+            return 0
+        with ThreadPoolExecutor(max_workers=min(4, len(targets))) as ex:
+            texts = list(ex.map(
+                lambda s: fetch_page_markdown(s.url, self._FULL_TEXT_MAX_CHARS),
+                targets,
+            ))
+        gained = 0
+        for s, text in zip(targets, texts):
+            s.full_text_fetched = True
+            s.full_text = text or ""
+            if text:
+                gained += 1
+        self._persist()
+        print(f"[sources] full text: {gained}/{len(targets)} cited source(s) fetched", flush=True)
+        return gained
+
+    def source_text_for(self, url: str) -> str | None:
+        """Stored body text a quote can be checked against, for one pooled
+        source: snippet, excerpt, and full text — what the source says.
+
+        The title is deliberately excluded and served by source_title_for:
+        a quote consisting of the headline passes a substring check while
+        substantiating nothing (the dominant unfaithful class in the first
+        judged run), so headline matches get their own status instead of
+        counting as verified. Returns "" for a pooled source with no stored
+        body text, None when the URL is not in the pool.
+        """
+        with self._lock:
+            s = self._by_url.get(normalise_url(url))
+        if s is None:
+            return None
+        return "\n".join(part for part in (s.snippet, s.excerpt, s.full_text) if part)
+
+    def source_title_for(self, url: str) -> str | None:
+        """The stored title for one pooled source; None when not pooled."""
+        with self._lock:
+            s = self._by_url.get(normalise_url(url))
+        return None if s is None else (s.title or "")
+
     # ------------------------------------------------------------- verify
 
     def verify_citations(self, text: str) -> tuple[list[str], list[str]]:
         """Split URLs cited in `text` into (in_pool, fabricated).
 
         This is the assertion that closes the loop: any URL the model emitted
-        that no search engine actually returned is fabricated by definition.
+        that no search engine returned is fabricated by definition.
         """
         if not text:
             return [], []
