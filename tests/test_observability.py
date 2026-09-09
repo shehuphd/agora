@@ -11,6 +11,8 @@ import json
 import uuid
 from datetime import datetime
 
+import pytest
+
 from core.checkpoint import write_state_json
 from core.state import Act, DialogueState, TokenUsage
 
@@ -117,6 +119,78 @@ class TestPromptBodiesInTraces:
         assert {"system": "SYSTEM PROMPT BODY", "user": "USER PROMPT BODY"} in trace.inputs
         # The raw model response is recorded too.
         assert any("response_raw" in o for o in trace.outputs)
+
+
+# ---------------------------------------------------------------------------
+# The attempt convention: retried model calls are grouped for the viewer
+# (traceact 1.3.0). Each retry inside one turn records attempt= and
+# attempt_reason= on its model event so the viewer collapses the sequence
+# into one ×N node; a clean first attempt carries no attempt number.
+# ---------------------------------------------------------------------------
+
+def _ok_json():
+    return json.dumps({"act_type": "ASSERT", "claim_id": None,
+                       "target_act_id": None, "content": "a claim",
+                       "reason": "r", "citations": []})
+
+
+def _prop(monkeypatch, responses):
+    from agents import base as _base
+    from agents.proposition import PropositionAgent
+
+    _TraceRecorder.instances = []
+    monkeypatch.setattr(_base, "ActionTrace", _TraceRecorder)
+    agent = PropositionAgent(provider="openai")
+    it = iter(responses)
+    monkeypatch.setattr(agent, "_call_provider",
+                        lambda s, u, max_tokens=None: (next(it), 100, 50))
+    return agent
+
+
+class TestAttemptConvention:
+    def test_clean_first_attempt_carries_no_attempt_number(self, monkeypatch):
+        agent = _prop(monkeypatch, [_ok_json()])
+        agent._traced_generate(_state(), "SYS", "USER")
+        models = _TraceRecorder.instances[0].models
+        assert len(models) == 1
+        # A normal turn stays a single plain model event — no ×1 clutter.
+        assert "attempt" not in models[0]
+        assert models[0].get("status") in (None,)
+        assert models[0]["tokens_in"] == 100
+
+    def test_json_retry_tags_both_attempts_and_names_the_reason(self, monkeypatch):
+        agent = _prop(monkeypatch, ["not json at all", _ok_json()])
+        act = agent._traced_generate(_state(), "SYS", "USER")
+        assert act.act_type == "ASSERT"
+        models = _TraceRecorder.instances[0].models
+        assert [m.get("attempt") for m in models] == [1, 2]
+        # The failed try is marked failed; the recovering try closes the sequence.
+        assert models[0].get("status") == "failed"
+        assert models[1].get("status") in (None,)
+        # attempt_reason on try 2 says what try 1 hit; try 1 carries none.
+        assert "attempt_reason" not in models[0]
+        assert models[1].get("attempt_reason") == "invalid JSON"
+        # Same target/operation, so the viewer groups them.
+        assert {m["target"] for m in models} == {agent.model}
+        assert {m["operation"] for m in models} == {"completion"}
+
+    def test_every_attempt_carries_its_own_duration_and_tokens(self, monkeypatch):
+        agent = _prop(monkeypatch, ["broken", _ok_json()])
+        agent._traced_generate(_state(), "SYS", "USER")
+        models = _TraceRecorder.instances[0].models
+        assert all("duration_ms" in m for m in models)
+        assert all(m["tokens_in"] == 100 and m["tokens_out"] == 50 for m in models)
+
+    def test_terminal_failure_marks_the_last_attempt_failed(self, monkeypatch):
+        from agents.base import ResponseParseError
+        agent = _prop(monkeypatch, ["nope", "still nope", "nope again"])
+        with pytest.raises(ResponseParseError):
+            agent._traced_generate(_state(), "SYS", "USER")
+        models = _TraceRecorder.instances[0].models
+        # Every attempt was billed and recorded, and all read as failed, so the
+        # viewer closes the sequence as "all N attempts failed".
+        assert [m.get("attempt") for m in models] == [1, 2, 3]
+        assert all(m.get("status") == "failed" for m in models)
 
 
 # ---------------------------------------------------------------------------

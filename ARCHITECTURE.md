@@ -61,7 +61,7 @@ You give Agora a motion and pick a model for each seat. The proposition searches
 
 ### Observability
 
-- Every debate is one `debate.run` traceact span keyed by run id, with nested `agent.generate` spans per call recording the full system and user prompt bodies, the raw model response, the model, provider, token counts, parse retries, citation-check results, and act type, plus `synthesiser.chapter` / `synthesiser.epoch` spans for the auxiliary summary calls and spans on searches and app actions (experiment CRUD, batch import, exports).
+- Every debate is one `debate.run` traceact span keyed by run id, with nested `agent.generate` spans per call recording the full system and user prompt bodies, the raw model response, the model, provider, token counts, each correction retry as its own attempt-tagged model event (JSON, missing-context, or quote repair, grouped into one node in the viewer), citation-check results, and act type, plus `synthesiser.chapter` / `synthesiser.epoch` spans for the auxiliary summary calls and spans on searches and app actions (experiment CRUD, batch import, exports).
 - Traces write to `data/traces/traces.jsonl` with 50MB rotation; the Traces screen queries them inline and launches the full traceact viewer pre-filtered to a run.
 - Each run directory is self-describing after the fact: `debate.db` (every act with tokens, cost, challenge type, retry count), `sources.json` (the evidence pool), `search_log.jsonl` (every raw search response), `config.json`, `overrides.json`.
 - The registry (`databases/runs.db`) holds the cross-run view: final status, tokens, cost, condition labels, computed `run_metrics`, and batch job/row history including per-row errors.

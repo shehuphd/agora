@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-06 11:42:55 UTC
+Last updated: 2026-09-09 19:37:37 UTC
 
 Every current source file, with what it defines and what it touches. A map for orienting in the codebase, not a copy of the docstrings.
 
@@ -19,7 +19,7 @@ Every current source file, with what it defines and what it touches. A map for o
 
 | File | What it is |
 |---|---|
-| `base.py` | `BaseAgent`: prompt assembly (history window, chapter summaries, evidence pool, citation and quote contracts, bounded challenge views), provider calls with an 8192-token completion cap, JSON parsing with bounded correction retries that always carry the original context, act legality (per-role allowlist) and content-validity checks, URL and quote enforcement against the pool, per-act cost pricing, tracing with full prompt bodies. Defines `AgentResponseError` / `ResponseParseError` / `InvalidContentError`. |
+| `base.py` | `BaseAgent`: prompt assembly (history window, chapter summaries, evidence pool, citation and quote contracts, bounded challenge views), provider calls with an 8192-token completion cap, JSON parsing with bounded correction retries that always carry the original context (each retry recorded as an attempt-tagged model event), act legality (per-role allowlist) and content-validity checks, URL and quote enforcement against the pool, per-act cost pricing, tracing with full prompt bodies. Defines `AgentResponseError` / `ResponseParseError` / `InvalidContentError`. |
 | `proposition.py` | Proposition agent: asserts, revises, and defends falsifiable claims; structured citations with verbatim quotes. |
 | `opposition.py` | Opposition agent: challenges across a rotating taxonomy, concedes under the protocol's conditions; bounded concede audit and URL-freshness set; referent checks on cited quotes. |
 | `moderator.py` | Moderator agent: per-turn status (with the latest act's citation-check results), interventions, closure decisions, debate-title generation; windowed turn cards; own response parser. |
@@ -113,7 +113,7 @@ Every current source file, with what it defines and what it touches. A map for o
 | `test_runpack.py` | Full-record export. |
 | `test_citations.py` | Quote contract and number grounding: normalisation equivalences, quote matching, per-act check statuses, enforcement pass, pool full-text fetch-once behaviour. |
 | `test_context_bounds.py` | The fixed-size turn-context frame: audit window, defence-list caps, bounded URL freshness, challenge lapsing, chapters in prompts, turn-card window, chapter cap with epoch collapse. |
-| `test_observability.py` | Prompt bodies in traces, chapters/lapsed/aux-cost in state.json, chapter and epoch calls traced and billed to state, aux cost in run totals. |
+| `test_observability.py` | Prompt bodies in traces, the attempt convention on retried model events (clean first attempt untagged, retries grouped with reasons and failed status), chapters/lapsed/aux-cost in state.json, chapter and epoch calls traced and billed to state, aux cost in run totals. |
 | `test_judge.py` | Judge scoring: verified-only item selection, sentence pairing, majority and median vote aggregation, chain assembly, JSON repair retry, failure holes, judgement storage round-trips. |
 | `test_event_queues.py` | Created debates get an unbounded event queue, so a run with no SSE consumer can't wedge on a full queue. |
 | `test_judge_endpoints.py` | Judge endpoints: estimate counts and prices, closed-runs-only guard, background judging stored and listed, double-start refusal, in-flight marker cleared on failure. |

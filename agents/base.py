@@ -2,6 +2,7 @@
 import os
 import re
 import json
+import time
 import uuid
 from datetime import datetime
 from traceact import ActionTrace
@@ -395,19 +396,55 @@ class BaseAgent:
             trace.input({"system": system, "user": user})
             if extra_in or extra_out:
                 trace.step(f"retrieve: {extra_in}+{extra_out} tokens, pool={len(pool) if pool else 0}")
+            t0 = time.perf_counter()
             raw, input_tok, output_tok = self._call_provider(system, user)
             # Retrieval is billed to this turn so run token budgets stay honest.
             input_tok += extra_in
             output_tok += extra_out
-            trace.model(operation="completion", target=self.model, provider=self._provider, tokens_in=input_tok, tokens_out=output_tok)
+            # Per-attempt call figures for the model event (the loop below keeps
+            # input_tok/output_tok as running totals for act billing). call_in and
+            # call_out are the tokens of the one call whose output is being judged
+            # this iteration; call_dur is that call's wall time.
+            call_in, call_out = input_tok, output_tok
+            call_dur = (time.perf_counter() - t0) * 1000.0
 
             attempt = 1
             repairs = 0
             last_raw = raw
+            # Reason the current attempt was launched (what the previous one hit).
+            # None for the first attempt; set before each retry. Recorded as
+            # traceact's attempt convention so the viewer groups the retried
+            # calls into one sequence, each keeping its own cost and timeline bar.
+            launch_reason: str | None = None
+
+            def _emit_call(status: str | None = None) -> None:
+                # A clean first attempt carries no attempt number, so a normal
+                # turn stays a single plain model event; only a call that is part
+                # of a retry sequence (this one failed, or a later attempt) is
+                # tagged, so the viewer collapses only actual retries into ×N.
+                kw: dict = {
+                    "operation": "completion", "target": self.model,
+                    "provider": self._provider, "tokens_in": call_in,
+                    "tokens_out": call_out, "duration_ms": round(call_dur, 1),
+                }
+                if status == "failed" or attempt > 1:
+                    kw["attempt"] = attempt
+                    if launch_reason:
+                        kw["attempt_reason"] = launch_reason
+                if status:
+                    kw["status"] = status
+                trace.model(**kw)
+
+            def _retry(fix_user: str) -> tuple[str, int, int, float]:
+                start = time.perf_counter()
+                r, i, o = self._call_provider(system, fix_user)
+                return r, i, o, (time.perf_counter() - start) * 1000.0
+
             while True:
                 try:
                     act = self._parse_result(last_raw, state, input_tok, output_tok)
                 except json.JSONDecodeError as exc:
+                    _emit_call(status="failed")
                     if attempt >= _MAX_PARSE_ATTEMPTS:
                         trace.step(f"parse failed permanently after {attempt} attempts")
                         trace.output({"error": str(exc), "raw_preview": last_raw[:300]})
@@ -418,15 +455,16 @@ class BaseAgent:
                     strict = attempt >= _MAX_PARSE_ATTEMPTS - 1
                     trace.step(f"parse failed — retrying with correction prompt (attempt {attempt + 1}, strict={strict})")
                     fix_user = _correction_prompt(user, last_raw, exc, strict=strict)
-                    raw2, i2, o2 = self._call_provider(system, fix_user)
+                    last_raw, i2, o2, call_dur = _retry(fix_user)
                     input_tok += i2
                     output_tok += o2
-                    trace.model(operation="completion", target=self.model, provider=self._provider, tokens_in=i2, tokens_out=o2)
-                    last_raw = raw2
+                    call_in, call_out = i2, o2
+                    launch_reason = "invalid JSON"
                     attempt += 1
                     continue
 
                 if _claims_missing_context(act.content):
+                    _emit_call(status="failed")
                     if attempt >= _MAX_PARSE_ATTEMPTS:
                         trace.step(f"content invalid permanently after {attempt} attempts")
                         trace.output({"error": "claims_missing_context", "content_preview": act.content[:300]})
@@ -436,11 +474,11 @@ class BaseAgent:
                         )
                     trace.step(f"content invalid (claims missing context) — retrying (attempt {attempt + 1})")
                     fix_user = _missing_context_correction_prompt(user, act.content)
-                    raw2, i2, o2 = self._call_provider(system, fix_user)
+                    last_raw, i2, o2, call_dur = _retry(fix_user)
                     input_tok += i2
                     output_tok += o2
-                    trace.model(operation="completion", target=self.model, provider=self._provider, tokens_in=i2, tokens_out=o2)
-                    last_raw = raw2
+                    call_in, call_out = i2, o2
+                    launch_reason = "claimed context missing"
                     attempt += 1
                     continue
 
@@ -454,17 +492,19 @@ class BaseAgent:
                     # the record poisons every downstream reader, so the model
                     # gets a single chance to fix or drop it before the act is
                     # recorded (annotated) as a violation.
+                    _emit_call(status="failed")
                     repairs = 1
                     trace.step(f"quote.repair: {len(mismatches)} mismatched "
                                f"quote(s) — one corrective retry")
                     fix_user = _citation_repair_prompt(user, last_raw, mismatches)
-                    raw2, i2, o2 = self._call_provider(system, fix_user)
+                    last_raw, i2, o2, call_dur = _retry(fix_user)
                     input_tok += i2
                     output_tok += o2
-                    trace.model(operation="completion", target=self.model, provider=self._provider, tokens_in=i2, tokens_out=o2)
-                    last_raw = raw2
+                    call_in, call_out = i2, o2
+                    launch_reason = "quote not in source"
                     attempt += 1
                     continue
+                _emit_call()
                 # The repair attempt re-enters the parse loop, so it is
                 # subtracted here to keep retries a pure parse-retry count.
                 act.retries = attempt - 1 - repairs

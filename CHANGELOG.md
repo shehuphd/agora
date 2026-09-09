@@ -30,6 +30,7 @@ Agora ships from its main branch; each entry below is one pushed release. Versio
 - Reasoning models get an 8192-token completion cap (a ceiling, not a spend), fixing empty turns from models whose hidden reasoning exhausted the old 2,048 cap.
 - `max_turns` has one source of truth (`config/defaults.yaml`, default 100) across every surface; token budget, not turn count, is the intended stop.
 - Documentation set expanded: USAGE.md, ARCHITECTURE.md, MANIFEST.md, this changelog.
+- [traceact](https://pypi.org/project/traceact) upgraded to 1.5.0 (from 1.0.0): model events already carry `provider`, so the viewer now prices each call and totals a trace; each correction retry inside a turn (JSON repair, missing-context repair, quote repair) records traceact's attempt convention (`attempt`, `attempt_reason`, and a failed status on the try that was rejected), so the viewer groups the retried calls into one node and each keeps its own cost and timeline bar; cancellations record as `cancelled` rather than `failed`, and the viewer gains a timeline view per trace.
 - [shiplock](https://pypi.org/project/shiplock) 0.3.0 release gate wired in (`shiplock.toml`), run by the test suite: docs-vs-code checks including banned-word sweeps over docs and source, architecture and manifest coverage, speech-act documentation coverage, duplicate dependency declarations, and assertion-free test detection.
 
 ### Fixed
