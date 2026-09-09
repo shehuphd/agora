@@ -29,12 +29,15 @@ def _retire_unknown_model(agent, exc: Exception) -> None:
 
     Only fires on the provider's own "unknown model" verdict — never on rate
     limits, auth, or transient failures, which say nothing about whether the
-    model exists. KeyCallError carries this as a typed code
-    (MODEL_NOT_AVAILABLE); any other exception falls back to the old
-    string check, kept for whatever isn't routed through keycall yet.
+    model exists. KeyCallError carries this as a typed code:
+    MODEL_NOT_AVAILABLE, or MODEL_RETIRED for a model the provider has
+    since shut down (keycall 1.10.0 refuses a retired model before the
+    network with its own code). Both mean the model won't serve, so both
+    retire it. Any other exception falls back to the old string check,
+    kept for whatever isn't routed through keycall yet.
     """
     if isinstance(exc, KeyCallError):
-        if exc.code.name != "MODEL_NOT_AVAILABLE":
+        if exc.code.name not in ("MODEL_NOT_AVAILABLE", "MODEL_RETIRED"):
             return
     else:
         low = str(exc).lower()

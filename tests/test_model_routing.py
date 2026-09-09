@@ -271,3 +271,18 @@ class TestRetireUnservableModel:
         exc = KeyCallError("rate limited", code=ErrorCode.RATE_LIMITED)
         _retire_unknown_model(self._agent(), exc)
         assert self._row(registry, "perplexity", "kimi-k3")["is_active"] == 1
+
+    def test_retired_model_code_retires(self, registry):
+        """keycall 1.10.0 refuses a provider-retired model before the network
+        with MODEL_RETIRED, distinct from MODEL_NOT_AVAILABLE. Both mean the
+        model won't serve, so a retired model must be marked unservable too —
+        otherwise it keeps being offered and keeps failing. The message is
+        deliberately unlike the string fallbacks, so only the typed path can
+        retire it."""
+        from keycall import ErrorCode, KeyCallError
+        exc = KeyCallError(
+            "kimi-k3 was retired by perplexity on 2026-02-19; the provider "
+            "recommends sonar",
+            code=ErrorCode.MODEL_RETIRED)
+        _retire_unknown_model(self._agent(), exc)
+        assert self._row(registry, "perplexity", "kimi-k3")["is_active"] == 0
