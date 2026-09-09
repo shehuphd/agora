@@ -30,3 +30,5 @@ Open [http://localhost:8502](http://localhost:8502), follow the onboarding wizar
 - [CHANGELOG.md](CHANGELOG.md): dated release history
 
 By [Mo Shehu](https://mohammedshehu.com)
+
+<!-- ci-gate-verify: actually should trip the docs gate -->
