@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-09 19:37:37 UTC
+Last updated: 2026-09-09 20:49:00 UTC
 
 Every current source file, with what it defines and what it touches. A map for orienting in the codebase, not a copy of the docstrings.
 
@@ -97,7 +97,7 @@ Every current source file, with what it defines and what it touches. A map for o
 | `test_checkpoint.py` | SQLite persistence round-trips. |
 | `test_base.py` | JSON parsing, correction retries carrying context, legality + validity checks, history window. |
 | `test_adversarial.py` | Injection, malformed input, edge cases. |
-| `test_keycall_backend.py` | Provider dispatch, retry fallbacks, key handling. |
+| `test_keycall_backend.py` | Provider dispatch, retry fallbacks, key handling, and a capability-drift probe asserting every keycall `ErrorCode` name Agora string-compares still exists. |
 | `test_model_routing.py` | Registry-only model resolution, unservable retirement. |
 | `test_config.py` | Single-source max_turns resolution. |
 | `test_pause_on_parse_failure.py` | Pause-and-retry on parse failures, transient provider errors, and fixable credential errors; unattended runs raise instead; projected budget stop. |

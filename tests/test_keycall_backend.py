@@ -7,7 +7,9 @@ so they run offline, with no network calls and no live keys.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import pathlib
 from dataclasses import dataclass, field
 
 import pytest
@@ -413,3 +415,86 @@ class TestListModelsAsync:
         _patch_keycall(monkeypatch, _FakeClient(models_result=discovery))
         models = asyncio.run(backend.list_models_async("google", "sk-good"))
         assert models[0].model_id == "gemini-2.5-flash"
+
+
+# ------------------------------------------------------------------
+# Capability-drift probe: the keycall ErrorCode names Agora relies on
+#
+# Agora branches on keycall's typed error codes by their string name
+# (`exc.code.name == "PERMISSION_DENIED"`, `not in ("MODEL_NOT_AVAILABLE",
+# "MODEL_RETIRED")`, ...). A string comparison degrades silently if keycall
+# renames or drops a member: the branch just stops matching — no exception,
+# no failing import, a wrong path taken forever. (Codes Agora reads through
+# `e.retryable` instead of by name can't drift this way and aren't probed
+# here; enum members referenced as `ErrorCode.X` in tests already fail loudly
+# on removal.) This probe scans the app for every `X.code.name` comparison,
+# harvests the string literals, and asserts each is still a live ErrorCode.
+# The test failing IS the notification to update the guard that uses it.
+# ------------------------------------------------------------------
+
+_APP_SOURCE_DIRS = ("agents", "api", "core", "providers", "runners")
+
+
+def _is_code_name(node: ast.AST) -> bool:
+    """True for an attribute chain ending in `.code.name` (any head)."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "name"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "code"
+    )
+
+
+def _string_consts(node: ast.AST) -> list[str]:
+    """String literals in a single operand or a tuple/list/set of them."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        out = []
+        for elt in node.elts:
+            out.extend(_string_consts(elt))
+        return out
+    return []
+
+
+def _referenced_error_codes() -> dict[str, list[str]]:
+    """{code name -> [file:line, ...]} for every literal compared against a
+    `.code.name` chain anywhere in the app source."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    found: dict[str, list[str]] = {}
+    for rel in _APP_SOURCE_DIRS:
+        for path in sorted((root / rel).rglob("*.py")):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Compare):
+                    continue
+                operands = [node.left, *node.comparators]
+                if not any(_is_code_name(o) for o in operands):
+                    continue
+                for operand in operands:
+                    for name in _string_consts(operand):
+                        where = f"{path.relative_to(root)}:{node.lineno}"
+                        found.setdefault(name, []).append(where)
+    return found
+
+
+class TestErrorCodeDrift:
+    def test_every_referenced_code_still_exists(self):
+        referenced = _referenced_error_codes()
+        # Scanner self-check: the app is known to compare these, so an empty or
+        # partial harvest means the scanner broke, not that the coupling is gone
+        # — fail rather than pass vacuously.
+        for expected in ("MODEL_NOT_AVAILABLE", "MODEL_RETIRED", "PERMISSION_DENIED"):
+            assert expected in referenced, (
+                f"scanner found no `.code.name` comparison against {expected!r}; "
+                "the AST probe is likely broken, not the coupling"
+            )
+        live = {c.name for c in ErrorCode}
+        missing = {name: sites for name, sites in referenced.items() if name not in live}
+        assert not missing, (
+            "Agora compares against keycall ErrorCode name(s) that no longer "
+            f"exist in keycall {__import__('keycall').__version__}: "
+            + "; ".join(f"{name} (used at {', '.join(sites)})" for name, sites in sorted(missing.items()))
+            + ". keycall renamed or dropped the code — update the guard at each "
+            "site to the current member name, then this probe."
+        )
