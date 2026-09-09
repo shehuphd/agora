@@ -1,6 +1,6 @@
 # Manifest
 
-Last updated: 2026-09-09 20:49:00 UTC
+Last updated: 2026-09-09 20:58:56 UTC
 
 Every current source file, with what it defines and what it touches. A map for orienting in the codebase, not a copy of the docstrings.
 
@@ -102,7 +102,7 @@ Every current source file, with what it defines and what it touches. A map for o
 | `test_config.py` | Single-source max_turns resolution. |
 | `test_pause_on_parse_failure.py` | Pause-and-retry on parse failures, transient provider errors, and fixable credential errors; unattended runs raise instead; projected budget stop. |
 | `test_error_close_parity.py` | A debater failure still gets a moderator close and an argument map; clean runs stay clean. |
-| `test_cost.py` | Price lookup, miss degradation, stable-tier preference, snapshot date. |
+| `test_cost.py` | Price lookup, miss degradation, stable-tier preference, snapshot date, and a capability-drift probe asserting every provider `core/cost.py` maps still resolves in rates and its price records still carry the fields cost.py reads. |
 | `test_run_cost.py` | Per-run cost totals and partial semantics. |
 | `test_cost_surfaces.py` | Lifetime spend, estimate provider resolution, SSE cost events, export cost line. |
 | `test_batch_durable.py` | Batch persistence, interruption stamping, retry, budget ceiling, concurrency clamp. |

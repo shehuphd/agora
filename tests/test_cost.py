@@ -7,6 +7,10 @@ both of which only mean something against the registry's actual data.
 """
 import pytest
 
+from functools import lru_cache
+
+import rates.ai
+
 from core import cost
 
 
@@ -150,3 +154,62 @@ class TestSnapshotDate:
     def test_none_when_rates_unavailable(self, monkeypatch):
         monkeypatch.setattr(cost, "_registry", lambda: None)
         assert cost.snapshot_date() is None
+
+
+# ------------------------------------------------------------------
+# Capability-drift probe: the rates coupling cost.py rests on
+#
+# core/cost.py prices a call by mapping Agora's provider name to rates' own
+# key (`_RATES_PROVIDER`, e.g. moonshot -> moonshotai) and reading `input_mtok`
+# / `output_mtok` off a matched record's `.price`. Both couplings fail SILENTLY
+# if rates drifts: a renamed provider key makes `reg.filter(provider=...)`
+# return nothing, a renamed price field makes `.get(...)` return None — either
+# way `price_for` returns None and every figure from that provider shows as
+# "unknown" instead of a price, with nothing raised. This probes rates raw (not
+# through cost.py, so a failure means rates changed, not that cost.py has a bug)
+# against the claims cost.py makes, so the next such rename fails a test that
+# names the drift instead of un-pricing a provider with nothing raised. TestKnownPrices
+# above checks specific values; this checks the coupling stays wired at all.
+# ------------------------------------------------------------------
+
+# The price-record fields cost.py:price_for reads from a rates `Price`. Kept
+# here as the claim being probed; a divergence here or in price_for is what
+# this test is meant to surface.
+_PRICE_FIELDS_COST_READS = ("input_mtok", "output_mtok")
+
+
+@lru_cache(maxsize=1)
+def _raw_registry():
+    """rates' bundled snapshot, loaded raw and offline (no `fetch`), once."""
+    return rates.ai.load()
+
+
+class TestRatesDrift:
+    def test_every_mapped_provider_still_resolves_in_rates(self):
+        reg = _raw_registry()
+        dropped = {}
+        for agora_provider, rates_provider in cost._RATES_PROVIDER.items():
+            if not list(reg.filter(provider=rates_provider)):
+                dropped[agora_provider] = rates_provider
+        assert not dropped, (
+            "rates no longer lists any model under the provider key(s) "
+            "core/cost.py maps to, so every figure from them would show as "
+            f"unknown: {dropped} (Agora provider -> rates key). rates renamed "
+            "or dropped the key — update _RATES_PROVIDER in core/cost.py and "
+            "this probe's expectation."
+        )
+
+    def test_price_record_carries_the_fields_cost_reads(self):
+        reg = _raw_registry()
+        # Any populated provider gives a representative record; openai is the
+        # largest and least likely to empty out.
+        record = list(reg.filter(provider="openai"))[0]
+        price = record.price
+        missing = [f for f in _PRICE_FIELDS_COST_READS
+                   if not isinstance(price.get(f), (int, float))]
+        assert not missing, (
+            "a rates price record no longer carries numeric field(s) "
+            f"{missing} that core/cost.py:price_for reads, so every call would "
+            "price as unknown. rates renamed the field(s) or changed their "
+            "type — update price_for and _PRICE_FIELDS_COST_READS together."
+        )
